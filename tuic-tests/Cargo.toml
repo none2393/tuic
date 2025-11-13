@@ -10,7 +10,6 @@ publish = false
 
 [features]
 default = ["aws-lc-rs"]
-ring = ["rustls/ring", "tuic-client/ring", "tuic-server/ring"]
 aws-lc-rs = ["dep:aws-lc-rs", "rustls/aws-lc-rs", "tuic-client/aws-lc-rs", "tuic-server/aws-lc-rs"]
 deplog = ["tracing-test/no-env-filter"]
 

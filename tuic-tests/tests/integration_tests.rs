@@ -286,8 +286,8 @@ async fn test_server_client_integration() {
 	use std::{collections::HashMap, net::SocketAddr, path::PathBuf};
 	#[cfg(feature = "aws-lc-rs")]
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-	#[cfg(feature = "ring")]
-	let _ = rustls::crypto::ring::default_provider().install_default();
+	// #[cfg(feature = "ring")]
+	// let _ = rustls::crypto::ring::default_provider().install_default();
 
 	// Create a minimal server configuration for testing
 	// IMPORTANT: We need to configure ACL to allow localhost connections for

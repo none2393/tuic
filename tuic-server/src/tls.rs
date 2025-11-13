@@ -90,8 +90,8 @@ async fn load_cert_key(cert_path: &Path, key_path: &Path) -> eyre::Result<Arc<Ce
 	let der = load_priv_key(key_path).await?;
 	#[cfg(feature = "aws-lc-rs")]
 	let key = rustls::crypto::aws_lc_rs::sign::any_supported_type(&der).context("Unsupported private key type")?;
-	#[cfg(feature = "ring")]
-	let key = rustls::crypto::ring::sign::any_supported_type(&der).context("Unsupported private key type")?;
+	// #[cfg(feature = "ring")]
+	// let key = rustls::crypto::ring::sign::any_supported_type(&der).context("Unsupported private key type")?;
 
 	Ok(Arc::new(CertifiedKey::new(cert_chain, key)))
 }

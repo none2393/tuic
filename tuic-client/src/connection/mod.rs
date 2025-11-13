@@ -41,7 +41,7 @@ mod handle_task;
 // Global state for endpoint, connection, and timeout
 static ENDPOINT: OnceCell<AsyncRwLock<Endpoint>> = OnceCell::new();
 static CONNECTION: AsyncOnceCell<AsyncRwLock<Connection>> = AsyncOnceCell::const_new();
-static TIMEOUT: AtomicCell<Duration> = AtomicCell::new(Duration::from_secs(8));
+static TIMEOUT: AtomicCell<Duration> = AtomicCell::new(Duration::from_secs(10));
 
 /// Default error code for QUIC connection
 pub const ERROR_CODE: VarInt = VarInt::from_u32(0);

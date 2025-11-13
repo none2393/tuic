@@ -1233,7 +1233,6 @@ dependencies = [
  "hyper-rustls",
  "hyper-util",
  "rcgen",
- "ring",
  "rustls",
  "rustls-pki-types",
  "serde",
@@ -1850,7 +1849,6 @@ checksum = "5fae430c6b28f1ad601274e78b7dffa0546de0b73b4cd32f46723c0c2a16f7a5"
 dependencies = [
  "aws-lc-rs",
  "pem",
- "ring",
  "rustls-pki-types",
  "time",
  "yasna",
