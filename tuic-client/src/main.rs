@@ -16,11 +16,6 @@ fn main() -> eyre::Result<()> {
 	{
 		_ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	}
-
-	#[cfg(feature = "ring")]
-	{
-		_ = rustls::crypto::ring::default_provider().install_default();
-	}
 	let cli = Cli::parse();
 	let env_state = EnvState::from_system();
 
@@ -60,3 +55,4 @@ fn main() -> eyre::Result<()> {
 
 	rt.block_on(async move { tuic_client::run(cfg).await })
 }
+

@@ -13,7 +13,6 @@ repository.workspace = true
 
 [features]
 default = ["aws-lc-rs"]
-ring = ["tuic-core/ring", "rustls/ring", "rcgen/ring", "rustls-acme/ring"]
 aws-lc-rs = ["tuic-core/aws-lc-rs", "dep:aws-lc-rs", "rustls/aws-lc-rs", "rcgen/aws_lc_rs", "rustls-acme/aws-lc-rs"]
 jemallocator = ["tikv-jemallocator"]
 
