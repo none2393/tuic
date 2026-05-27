@@ -556,11 +556,7 @@ mod tests {
 		};
 		use tokio_rustls::TlsAcceptor;
 
-		// Install default crypto provider
-		#[cfg(feature = "ring")]
-		let _ = rustls::crypto::ring::default_provider().install_default();
-		#[cfg(all(feature = "aws-lc-rs", not(feature = "ring")))]
-		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		// Install default crypto provider.\.cross\_ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
 		// Generate self-signed certificate for test domain
 		let cert_params = CertificateParams::new(vec![test_hostname.to_string()]).unwrap();
@@ -786,3 +782,4 @@ mod tests {
 		eprintln!("TLS 1.3: Successfully extracted SNI: {:?}", sni);
 	}
 }
+

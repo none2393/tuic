@@ -13,10 +13,6 @@ use tuic_server::{
 static GLOBAL: Jemalloc = Jemalloc;
 
 fn main() -> eyre::Result<()> {
-	#[cfg(feature = "aws-lc-rs")]
-	{
-		_ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-	}
 	let cli = Cli::parse();
 	let env_state = EnvState::from_system();
 
