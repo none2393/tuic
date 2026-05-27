@@ -260,17 +260,20 @@ impl Connection<side::Client> {
 		match header {
 			Header::Authenticate(_) => Err(Error::BadCommandDatagram("authenticate", dg.into_inner())),
 			Header::Connect(_) => Err(Error::BadCommandDatagram("connect", dg.into_inner())),
-			Header::Packet(pkt) if let Some(inner_pkt) = self.model.recv_packet(pkt.clone()) => {
-				let pos = dg.position() as usize;
-				let mut buf = dg.into_inner();
-				if (pos + inner_pkt.size() as usize) <= buf.len() {
-					buf = buf.slice(pos..pos + inner_pkt.size() as usize);
-					Ok(Task::Packet(Packet::new(inner_pkt, PacketSource::Native(buf))))
+			Header::Packet(pkt) => {
+				if let Some(inner_pkt) = self.model.recv_packet(pkt.clone()) {
+					let pos = dg.position() as usize;
+					let mut buf = dg.into_inner();
+					if (pos + inner_pkt.size() as usize) <= buf.len() {
+						buf = buf.slice(pos..pos + inner_pkt.size() as usize);
+						Ok(Task::Packet(Packet::new(inner_pkt, PacketSource::Native(buf))))
+					} else {
+						Err(Error::PayloadLength(inner_pkt.size() as usize, buf.len() - pos))
+					}
 				} else {
-					Err(Error::PayloadLength(inner_pkt.size() as usize, buf.len() - pos))
+					Err(Error::InvalidUdpSession(pkt.assoc_id(), pkt.pkt_id()))
 				}
 			}
-			Header::Packet(pkt) => Err(Error::InvalidUdpSession(pkt.assoc_id(), pkt.pkt_id())),
 			Header::Dissociate(_) => Err(Error::BadCommandDatagram("dissociate", dg.into_inner())),
 			Header::Heartbeat(_) => Err(Error::BadCommandDatagram("heartbeat", dg.into_inner())),
 		}
