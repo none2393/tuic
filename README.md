@@ -13,7 +13,7 @@ Compared to origin, this fork's new features:
 
 **TLS & Security:**
 
-- Automatic SSL/TLS certificate provisioning via ACME (Let's Encrypt)
+- Automatic SSL/TLS certificate provisioning via ACME (Let's Encrypt) for domain or **IP**
 - Self-signed certificate support
 - Certificate auto hot-reload for zero-downtime updates
 - `skip_cert_verify` option for client connections
@@ -23,6 +23,7 @@ Compared to origin, this fork's new features:
 - AWS-LC-RS crypto provider for improved performance
 - More active `max_concurrent_streams` strategy
 - Rust edition 2024
+- BBR3 congestion control algorithm support
 
 **Server Features:**
 - ACL (Access Control List) support with configurable outbound rules

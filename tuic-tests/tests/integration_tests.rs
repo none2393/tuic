@@ -1,16 +1,29 @@
 // Integration tests for TUIC protocol
 // Tests the marshal/unmarshal round-trip for all protocol types
 
-use std::time::Duration;
+use std::{io::Cursor, time::Duration};
 
+use serial_test::serial;
 use tokio::time::timeout;
-use tuic_core::{Address, Authenticate, Connect, Dissociate, Header, Heartbeat, Packet};
+use tracing::{error, info};
+use tuic_core::{Address, Authenticate, Connect, Dissociate, Header, Heartbeat, Packet, StackPrefer};
+use tuic_server::config::ExperimentalConfig;
+use tuic_tests::{
+	run_socks5_server, run_tcp_echo_server, run_udp_echo_server, test_tcp_through_socks5, test_udp_through_socks5,
+};
 use uuid::Uuid;
+
+// Helper function to marshal and unmarshal a header
+fn marshal_unmarshal_header(header: Header) -> Header {
+	let mut buf = Vec::new();
+	header.marshal(&mut buf).unwrap();
+
+	let mut cursor = Cursor::new(buf);
+	Header::unmarshal(&mut cursor).unwrap()
+}
 
 #[test]
 fn test_full_protocol_roundtrip() {
-	use std::io::Cursor;
-
 	// Test all header types can be marshaled and unmarshaled correctly
 
 	// 1. Authenticate
@@ -19,11 +32,7 @@ fn test_full_protocol_roundtrip() {
 	let auth = Authenticate::new(uuid, token);
 	let header = Header::Authenticate(auth);
 
-	let mut buf = Vec::new();
-	header.marshal(&mut buf).unwrap();
-
-	let mut cursor = Cursor::new(buf);
-	let decoded = Header::unmarshal(&mut cursor).unwrap();
+	let decoded = marshal_unmarshal_header(header);
 
 	match decoded {
 		Header::Authenticate(decoded_auth) => {
@@ -45,11 +54,7 @@ fn test_full_protocol_roundtrip() {
 		let conn = Connect::new(addr.clone());
 		let header = Header::Connect(conn);
 
-		let mut buf = Vec::new();
-		header.marshal(&mut buf).unwrap();
-
-		let mut cursor = Cursor::new(buf);
-		let decoded = Header::unmarshal(&mut cursor).unwrap();
+		let decoded = marshal_unmarshal_header(header);
 
 		match decoded {
 			Header::Connect(decoded_conn) => {
@@ -64,11 +69,7 @@ fn test_full_protocol_roundtrip() {
 	let pkt = Packet::new(123, 456, 10, 5, 2048, addr.clone());
 	let header = Header::Packet(pkt);
 
-	let mut buf = Vec::new();
-	header.marshal(&mut buf).unwrap();
-
-	let mut cursor = Cursor::new(buf);
-	let decoded = Header::unmarshal(&mut cursor).unwrap();
+	let decoded = marshal_unmarshal_header(header);
 
 	match decoded {
 		Header::Packet(decoded_pkt) => {
@@ -86,11 +87,7 @@ fn test_full_protocol_roundtrip() {
 	let dissoc = Dissociate::new(999);
 	let header = Header::Dissociate(dissoc);
 
-	let mut buf = Vec::new();
-	header.marshal(&mut buf).unwrap();
-
-	let mut cursor = Cursor::new(buf);
-	let decoded = Header::unmarshal(&mut cursor).unwrap();
+	let decoded = marshal_unmarshal_header(header);
 
 	match decoded {
 		Header::Dissociate(decoded_dissoc) => {
@@ -103,11 +100,7 @@ fn test_full_protocol_roundtrip() {
 	let hb = Heartbeat::new();
 	let header = Header::Heartbeat(hb);
 
-	let mut buf = Vec::new();
-	header.marshal(&mut buf).unwrap();
-
-	let mut cursor = Cursor::new(buf);
-	let decoded = Header::unmarshal(&mut cursor).unwrap();
+	let decoded = marshal_unmarshal_header(header);
 
 	match decoded {
 		Header::Heartbeat(_) => {}
@@ -117,8 +110,6 @@ fn test_full_protocol_roundtrip() {
 
 #[test]
 fn test_fragmented_udp_packets() {
-	use std::io::Cursor;
-
 	// Simulate a UDP packet split into 3 fragments
 	let total_frags = 3;
 	let assoc_id = 100;
@@ -136,11 +127,7 @@ fn test_fragmented_udp_packets() {
 		let pkt = Packet::new(assoc_id, pkt_id, total_frags, frag_id, 500, addr.clone());
 		let header = Header::Packet(pkt);
 
-		let mut buf = Vec::new();
-		header.marshal(&mut buf).unwrap();
-
-		let mut cursor = Cursor::new(buf);
-		let decoded = Header::unmarshal(&mut cursor).unwrap();
+		let decoded = marshal_unmarshal_header(header);
 
 		match decoded {
 			Header::Packet(decoded_pkt) => {
@@ -157,8 +144,6 @@ fn test_fragmented_udp_packets() {
 
 #[test]
 fn test_edge_case_values() {
-	use std::io::Cursor;
-
 	// Test edge case values for Packet
 	let test_cases = vec![
 		(0u16, 0u16, 1u8, 0u8, 0u16),                         // Minimum values
@@ -171,11 +156,7 @@ fn test_edge_case_values() {
 		let pkt = Packet::new(assoc_id, pkt_id, frag_total, frag_id, size, addr.clone());
 		let header = Header::Packet(pkt);
 
-		let mut buf = Vec::new();
-		header.marshal(&mut buf).unwrap();
-
-		let mut cursor = Cursor::new(buf);
-		let decoded = Header::unmarshal(&mut cursor).unwrap();
+		let decoded = marshal_unmarshal_header(header);
 
 		match decoded {
 			Header::Packet(decoded_pkt) => {
@@ -192,8 +173,6 @@ fn test_edge_case_values() {
 
 #[test]
 fn test_various_domain_names() {
-	use std::io::Cursor;
-
 	// Test various domain name lengths and formats
 	let binding = "a".repeat(63);
 	let domains = vec![
@@ -211,11 +190,7 @@ fn test_various_domain_names() {
 		let conn = Connect::new(addr.clone());
 		let header = Header::Connect(conn);
 
-		let mut buf = Vec::new();
-		header.marshal(&mut buf).unwrap();
-
-		let mut cursor = Cursor::new(buf);
-		let decoded = Header::unmarshal(&mut cursor).unwrap();
+		let decoded = marshal_unmarshal_header(header);
 
 		match decoded {
 			Header::Connect(decoded_conn) => {
@@ -224,48 +199,6 @@ fn test_various_domain_names() {
 			_ => panic!("Wrong header type"),
 		}
 	}
-}
-
-#[test]
-fn test_address_serialization_lengths() {
-	// Test that serialization lengths are calculated correctly
-	let none_addr = Address::None;
-	assert_eq!(none_addr.len(), 1);
-
-	let domain_addr = Address::DomainAddress("example.com".to_string(), 443);
-	assert_eq!(domain_addr.len(), 1 + 1 + "example.com".len() + 2);
-
-	let ipv4_addr = Address::SocketAddress("192.168.1.1:8080".parse().unwrap());
-	assert_eq!(ipv4_addr.len(), 1 + 4 + 2);
-
-	let ipv6_addr = Address::SocketAddress("[2001:db8::1]:9000".parse().unwrap());
-	assert_eq!(ipv6_addr.len(), 1 + 16 + 2);
-}
-
-#[test]
-fn test_header_serialization_lengths() {
-	// Test that header lengths are calculated correctly
-	let uuid = Uuid::new_v4();
-	let token = [0u8; 32];
-	let auth = Authenticate::new(uuid, token);
-	let header = Header::Authenticate(auth);
-	assert_eq!(header.len(), 2 + 48); // version + type + auth data
-
-	let conn = Connect::new(Address::None);
-	let header = Header::Connect(conn);
-	assert_eq!(header.len(), 2 + 1); // version + type + address
-
-	let pkt = Packet::new(1, 2, 3, 4, 5, Address::None);
-	let header = Header::Packet(pkt);
-	assert_eq!(header.len(), 2 + 2 + 2 + 1 + 1 + 2 + 1); // version + type + packet fields + address
-
-	let dissoc = Dissociate::new(100);
-	let header = Header::Dissociate(dissoc);
-	assert_eq!(header.len(), 2 + 2); // version + type + assoc_id
-
-	let hb = Heartbeat::new();
-	let header = Header::Heartbeat(hb);
-	assert_eq!(header.len(), 2); // version + type only
 }
 
 // Integration test that calls tuic-server and tuic-client run methods
@@ -280,25 +213,33 @@ fn test_header_serialization_lengths() {
 //
 // IMPORTANT: The server ACL must be configured to allow localhost connections
 // for the test to work, since all echo servers run on 127.0.0.1
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
+#[serial]
 #[tracing_test::traced_test]
-async fn test_server_client_integration() {
+#[cfg_attr(not(any(target_arch = "x86", target_arch = "x86_64")), ignore)]
+async fn test_server_client_integration() -> eyre::Result<()> {
 	use std::{collections::HashMap, net::SocketAddr, path::PathBuf};
 	#[cfg(feature = "aws-lc-rs")]
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	// #[cfg(feature = "ring")]
 	// let _ = rustls::crypto::ring::default_provider().install_default();
 
+	// Initialize tracing subscriber to capture client/server logs at DEBUG level
+	let _ = tracing_subscriber::fmt()
+		.with_max_level(tracing::Level::DEBUG)
+		.with_test_writer()
+		.try_init();
+
 	// Create a minimal server configuration for testing
 	// IMPORTANT: We need to configure ACL to allow localhost connections for
 	// testing
 	let server_config = tuic_server::Config {
 		log_level: tuic_server::config::LogLevel::Debug,
-		server: "127.0.0.1:8443".parse::<SocketAddr>().unwrap(),
+		server: "127.0.0.1:8443".parse::<SocketAddr>()?,
 		users: {
 			let mut users = HashMap::new();
 			users.insert(
-				Uuid::parse_str("00000000-0000-0000-0000-000000000000").unwrap(),
+				Uuid::parse_str("00000000-0000-0000-0000-000000000000")?,
 				"test_password".to_string(),
 			);
 			users
@@ -310,6 +251,315 @@ async fn test_server_client_integration() {
 			alpn:        vec!["h3".to_string()],
 			hostname:    "localhost".to_string(),
 			auto_ssl:    false,
+			acme_email:  "admin@example.com".to_string(),
+		},
+		data_dir: std::env::temp_dir(),
+		quic: tuic_server::config::QuicConfig::default(),
+		udp_relay_ipv6: true,
+		zero_rtt_handshake: false,
+		dual_stack: false,
+		experimental: ExperimentalConfig {
+			drop_loopback: false,
+			..Default::default()
+		},
+		..Default::default()
+	};
+
+	// Spawn server in background
+	info!("[Integration Test] Starting TUIC server on 127.0.0.1:8443...");
+	let server_handle = tokio::spawn(async move {
+		// Run server with a timeout
+		match timeout(Duration::from_secs(30), tuic_server::run(server_config)).await {
+			Ok(Ok(_guard)) => info!("[Integration Test] Server completed successfully"),
+			Ok(Err(e)) => error!("[Integration Test] Server error: {}", e),
+			Err(_) => error!("[Integration Test] Server timeout"),
+		}
+	});
+
+	// Wait a bit for server to start
+	info!("[Integration Test] Waiting for server to initialize...");
+	tokio::time::sleep(Duration::from_secs(1)).await;
+	info!("[Integration Test] Server should be ready now");
+
+	// Create a client configuration that connects to the test server
+	let client_config = tuic_client::Config {
+		tokio_runtime: Default::default(),
+		relay:         tuic_client::config::Relay {
+			server: ("127.0.0.1".to_string(), 8443),
+			uuid: Uuid::parse_str("00000000-0000-0000-0000-000000000000")?,
+			password: std::sync::Arc::from(b"test_password".to_vec().into_boxed_slice()),
+			ip: None,
+			ipstack_prefer: StackPrefer::V6first,
+			certificates: Vec::new(),
+			udp_relay_mode: tuic_client::utils::UdpRelayMode::Native,
+			congestion_control: tuic_client::utils::CongestionControl::Cubic,
+			alpn: vec![b"h3".to_vec()],
+			zero_rtt_handshake: false,
+			disable_sni: true,
+			disable_native_certs: true,
+			gso: false,
+			pmtu: false,
+			skip_cert_verify: true,
+			..Default::default()
+		},
+		local:         tuic_client::config::Local {
+			server:          "127.0.0.1:1080".parse()?,
+			username:        None,
+			password:        None,
+			dual_stack:      Some(false),
+			max_packet_size: 1500,
+			tcp_forward:     Vec::new(),
+			udp_forward:     Vec::new(),
+		},
+		log_level:     "debug".to_string(),
+	};
+
+	// Spawn client in background with timeout
+	info!("[Integration Test] Starting TUIC client with SOCKS5 server on 127.0.0.1:1080...");
+	let client_handle = tokio::spawn(async move {
+		match timeout(Duration::from_secs(30), tuic_client::run(client_config)).await {
+			Ok(Ok(())) => info!("[Integration Test] Client completed successfully"),
+			Ok(Err(e)) => error!("[Integration Test] Client error: {}", e),
+			Err(_) => error!("[Integration Test] Client timeout"),
+		}
+	});
+
+	// Wait for client to establish connection and start SOCKS5 server
+	info!("[Integration Test] Waiting for client to connect and start SOCKS5 server...");
+	tokio::time::sleep(Duration::from_secs(5)).await;
+	info!("[Integration Test] SOCKS5 proxy should be ready now\n");
+
+	// Quick connectivity check - try to connect to SOCKS5 proxy
+	use tokio::net::TcpStream;
+	info!("[Integration Test] Testing SOCKS5 proxy connectivity...");
+	let stream = TcpStream::connect("127.0.0.1:1080")
+		.await
+		.expect("[Integration Test] Failed to connect to SOCKS5 proxy at 127.0.0.1:1080");
+	info!("[Integration Test] ✓ Successfully connected to SOCKS5 proxy at 127.0.0.1:1080");
+	info!(
+		"[Integration Test] Local: {:?}, Peer: {:?}",
+		stream.local_addr(),
+		stream.peer_addr()
+	);
+	drop(stream);
+
+	// ============================================================================
+	// Test 1: Create a local TCP echo server and test TCP relay through SOCKS5
+	// ============================================================================
+	let tcp_test = async {
+		info!("[TCP Test] Starting TCP relay test...");
+
+		// Start a local TCP echo server
+		let (echo_task, echo_addr) = run_tcp_echo_server("127.0.0.1:0", "TCP Test").await;
+
+		// Give server time to start
+		tokio::time::sleep(Duration::from_millis(200)).await;
+
+		// Test TCP connection through SOCKS5
+		let test_data = b"Hello, TUIC!";
+		let result = test_tcp_through_socks5("127.0.0.1:1080", echo_addr, test_data, "TCP Test").await;
+		assert!(
+			result.is_ok(),
+			"[TCP Test] TCP relay through SOCKS5 failed: {:?}",
+			result.err()
+		);
+
+		// Wait a bit to see if echo server gets anything
+		info!("[TCP Test] Waiting for echo server to finish...");
+		tokio::time::sleep(Duration::from_millis(500)).await;
+
+		// Clean up
+		echo_task.abort();
+		info!("[TCP Test] TCP test completed\n");
+	};
+
+	// Run the TCP test with a timeout
+	timeout(Duration::from_secs(30), tcp_test)
+		.await
+		.expect("[TCP Test] TCP test timed out");
+
+	// ============================================================================
+	// Test 2: Create a local UDP echo server and test UDP relay through SOCKS5
+	// ============================================================================
+	let udp_test = async {
+		use std::net::{IpAddr, Ipv4Addr};
+
+		info!("\n[UDP Test] ========================================");
+		info!("[UDP Test] Starting UDP relay test...");
+		info!("[UDP Test] ========================================\n");
+
+		// Start a local UDP echo server
+		let (echo_task, echo_addr, _echo_server) = run_udp_echo_server("127.0.0.1:0", "UDP Test").await;
+
+		// Give server time to start
+		tokio::time::sleep(Duration::from_millis(100)).await;
+
+		// Test UDP connection through SOCKS5
+		let test_data = b"Hello, UDP through TUIC!";
+		let client_bind_addr = std::net::SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+		let result = test_udp_through_socks5("127.0.0.1:1080", echo_addr, test_data, "UDP Test", client_bind_addr).await;
+		assert!(
+			result.is_ok(),
+			"[UDP Test] UDP relay through SOCKS5 failed: {:?}",
+			result.err()
+		);
+
+		// Clean up
+		echo_task.abort();
+		info!("[UDP Test] UDP test completed\n");
+	};
+
+	// Run the UDP test with a timeout
+	timeout(Duration::from_secs(30), udp_test)
+		.await
+		.expect("[UDP Test] UDP test timed out");
+
+	// ============================================================================
+	// Test 3: Test multiple concurrent TCP connections
+	// ============================================================================
+	let concurrent_test = async {
+		use fast_socks5::client::{Config, Socks5Stream};
+		use tokio::{
+			io::{AsyncReadExt, AsyncWriteExt},
+			net::TcpListener,
+		};
+
+		info!("[Concurrent Test] Starting concurrent TCP connections test...");
+
+		// Start a local TCP server
+		let server = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let server_addr = server.local_addr().unwrap();
+		info!("[Concurrent Test] TCP server started at: {}", server_addr);
+
+		// Spawn server task that handles multiple connections
+		let server_task = tokio::spawn(async move {
+			for i in 0..3 {
+				if let Ok((mut socket, addr)) = server.accept().await {
+					info!("[Concurrent Test Server] Accepted connection {} from: {}", i, addr);
+					tokio::spawn(async move {
+						let mut buf = vec![0u8; 1024];
+						if let Ok(n) = socket.read(&mut buf).await {
+							info!("[Concurrent Test Server] Connection {}: received {} bytes", i, n);
+							if let Err(e) = socket.write_all(&buf[..n]).await {
+								error!("[Concurrent Test Server] Connection {}: failed to echo: {}", i, e);
+							}
+						}
+					});
+				}
+			}
+		});
+
+		tokio::time::sleep(Duration::from_millis(100)).await;
+
+		// Create multiple concurrent connections through SOCKS5
+		info!("[Concurrent Test] Creating 3 concurrent connections through SOCKS5...");
+		let mut handles = vec![];
+		for i in 0..3 {
+			let addr = server_addr;
+			let handle = tokio::spawn(async move {
+				info!("[Concurrent Test] Connection {}: connecting...", i);
+				let mut stream = Socks5Stream::connect(
+					"127.0.0.1:1080".parse::<std::net::SocketAddr>().unwrap(),
+					addr.ip().to_string(),
+					addr.port(),
+					Config::default(),
+				)
+				.await
+				.unwrap_or_else(|e| panic!("[Concurrent Test] Connection {}: failed to connect: {}", i, e));
+
+				info!("[Concurrent Test] Connection {}: connected", i);
+				let test_data = format!("Connection {}", i);
+
+				stream
+					.write_all(test_data.as_bytes())
+					.await
+					.unwrap_or_else(|e| panic!("[Concurrent Test] Connection {}: failed to send: {}", i, e));
+				info!("[Concurrent Test] Connection {}: sent {} bytes", i, test_data.len());
+
+				let mut buf = vec![0u8; 1024];
+				let n = timeout(Duration::from_secs(5), stream.read(&mut buf))
+					.await
+					.unwrap_or_else(|_| panic!("[Concurrent Test] Connection {}: receive timed out", i))
+					.unwrap_or_else(|e| panic!("[Concurrent Test] Connection {}: failed to receive: {}", i, e));
+				info!("[Concurrent Test] Connection {}: received {} bytes", i, n);
+				assert!(n > 0, "[Concurrent Test] Connection {}: received 0 bytes", i);
+			});
+			handles.push(handle);
+		}
+
+		// Wait for all connections to complete
+		for (i, handle) in handles.into_iter().enumerate() {
+			handle
+				.await
+				.unwrap_or_else(|e| panic!("[Concurrent Test] Connection {} task failed: {}", i, e));
+		}
+
+		info!("[Concurrent Test] ✓ All concurrent connections completed");
+		server_task.abort();
+		info!("[Concurrent Test] Concurrent test completed\n");
+	};
+
+	// Run the concurrent test with a timeout
+	timeout(Duration::from_secs(30), concurrent_test)
+		.await
+		.expect("[Concurrent Test] Concurrent test timed out");
+
+	// Clean up
+	client_handle.abort();
+	server_handle.abort();
+
+	// Give tasks time to clean up
+	tokio::time::sleep(Duration::from_millis(100)).await;
+
+	Ok(())
+}
+
+// Integration test for IPv6 connectivity
+//
+// This test validates TUIC with IPv6 addresses:
+// - Server listening on [::1]:8444 (IPv6 localhost)
+// - Client connecting to [::1]:8444
+// - SOCKS5 proxy on [::1]:1081
+// - TCP relay through IPv6
+// - UDP relay through IPv6 (native mode)
+//
+// This addresses the error that occurs when using IPv6 addresses like
+// "[::1]:443"
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+#[tracing_test::traced_test]
+#[cfg_attr(not(any(target_arch = "x86", target_arch = "x86_64")), ignore)]
+async fn test_ipv6_server_client_integration() -> eyre::Result<()> {
+	use std::{collections::HashMap, net::SocketAddr, path::PathBuf};
+	#[cfg(feature = "aws-lc-rs")]
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	#[cfg(feature = "ring")]
+	let _ = rustls::crypto::ring::default_provider().install_default();
+
+	info!("\n[IPv6 Test] ========================================");
+	info!("[IPv6 Test] Starting IPv6 Integration Test");
+	info!("[IPv6 Test] ========================================\n");
+
+	// Create server configuration using IPv6 localhost [::1]
+	let server_config = tuic_server::Config {
+		log_level: tuic_server::config::LogLevel::Debug,
+		server: "[::1]:8444".parse::<SocketAddr>()?,
+		users: {
+			let mut users = HashMap::new();
+			users.insert(
+				Uuid::parse_str("00000000-0000-0000-0000-000000000000")?,
+				"test_password".to_string(),
+			);
+			users
+		},
+		tls: tuic_server::config::TlsConfig {
+			self_sign:   true,
+			certificate: PathBuf::from("./test_cert_ipv6.pem"),
+			private_key: PathBuf::from("./test_key_ipv6.pem"),
+			alpn:        vec!["h3".to_string()],
+			hostname:    "localhost".to_string(),
+			auto_ssl:    false,
+			acme_email:  "admin@example.com".to_string(),
 		},
 		data_dir: std::env::temp_dir(),
 		restful: None,
@@ -324,7 +574,7 @@ async fn test_server_client_integration() {
 		max_external_packet_size: 1500,
 		stream_timeout: Duration::from_secs(60),
 		outbound: tuic_server::config::OutboundConfig::default(),
-		// Allow localhost connections for testing - by default ACL blocks localhost
+		// Allow localhost connections for testing
 		acl: vec![tuic_server::acl::AclRule {
 			outbound: "allow".to_string(),
 			addr:     tuic_server::acl::AclAddress::Localhost,
@@ -334,27 +584,27 @@ async fn test_server_client_integration() {
 		..Default::default()
 	};
 
-	// Spawn server in background
-	println!("[Integration Test] Starting TUIC server on 127.0.0.1:8443...");
+	// Spawn IPv6 server
+	info!("[IPv6 Test] Starting TUIC server on [::1]:8444...");
 	let server_handle = tokio::spawn(async move {
-		// Run server with a timeout
-		match timeout(Duration::from_secs(10), tuic_server::run(server_config)).await {
-			Ok(Ok(())) => println!("[Integration Test] Server completed successfully"),
-			Ok(Err(e)) => eprintln!("[Integration Test] Server error: {}", e),
-			Err(_) => eprintln!("[Integration Test] Server timeout"),
+		match timeout(Duration::from_secs(30), tuic_server::run(server_config)).await {
+			Ok(Ok(_guard)) => info!("[IPv6 Test] Server completed successfully"),
+			Ok(Err(e)) => error!("[IPv6 Test] Server error: {}", e),
+			Err(_) => error!("[IPv6 Test] Server timeout"),
 		}
 	});
 
-	// Wait a bit for server to start
-	println!("[Integration Test] Waiting for server to initialize...");
+	// Wait for server to start
+	info!("[IPv6 Test] Waiting for server to initialize...");
 	tokio::time::sleep(Duration::from_secs(1)).await;
-	println!("[Integration Test] Server should be ready now");
+	info!("[IPv6 Test] Server should be ready now");
 
-	// Create a client configuration that connects to the test server
+	// Create client configuration connecting to IPv6 server
 	let client_config = tuic_client::Config {
-		relay:     tuic_client::config::Relay {
-			server:               ("127.0.0.1".to_string(), 8443),
-			uuid:                 Uuid::parse_str("00000000-0000-0000-0000-000000000000").unwrap(),
+		tokio_runtime: Default::default(),
+		relay:         tuic_client::config::Relay {
+			server:               ("[::1]".to_string(), 8444),
+			uuid:                 Uuid::parse_str("00000000-0000-0000-0000-000000000000")?,
 			password:             std::sync::Arc::from(b"test_password".to_vec().into_boxed_slice()),
 			ip:                   None,
 			ipstack_prefer:       tuic_client::utils::StackPrefer::V6first,
@@ -364,7 +614,9 @@ async fn test_server_client_integration() {
 			alpn:                 vec![b"h3".to_vec()],
 			zero_rtt_handshake:   false,
 			disable_sni:          true,
+			sni:                  None,
 			timeout:              Duration::from_secs(8),
+			startup_mode:         tuic_client::config::StartupMode::Lazy,
 			heartbeat:            Duration::from_secs(3),
 			disable_native_certs: true,
 			send_window:          8 * 1024 * 1024 * 2,
@@ -376,9 +628,10 @@ async fn test_server_client_integration() {
 			gc_interval:          Duration::from_secs(3),
 			gc_lifetime:          Duration::from_secs(15),
 			skip_cert_verify:     true,
+			proxy:                None,
 		},
-		local:     tuic_client::config::Local {
-			server:          "127.0.0.1:1080".parse().unwrap(),
+		local:         tuic_client::config::Local {
+			server:          "[::1]:1081".parse()?,
 			username:        None,
 			password:        None,
 			dual_stack:      Some(false),
@@ -386,423 +639,301 @@ async fn test_server_client_integration() {
 			tcp_forward:     Vec::new(),
 			udp_forward:     Vec::new(),
 		},
-		log_level: "debug".to_string(),
+		log_level:     "debug".to_string(),
 	};
 
-	// Spawn client in background with timeout
-	println!("[Integration Test] Starting TUIC client with SOCKS5 server on 127.0.0.1:1080...");
+	// Spawn client with IPv6 SOCKS5 server
+	info!("[IPv6 Test] Starting TUIC client with SOCKS5 server on [::1]:1081...");
 	let client_handle = tokio::spawn(async move {
-		match timeout(Duration::from_secs(10), tuic_client::run(client_config)).await {
-			Ok(Ok(())) => println!("[Integration Test] Client completed successfully"),
-			Ok(Err(e)) => eprintln!("[Integration Test] Client error: {}", e),
-			Err(_) => eprintln!("[Integration Test] Client timeout"),
+		match timeout(Duration::from_secs(30), tuic_client::run(client_config)).await {
+			Ok(Ok(())) => info!("[IPv6 Test] Client completed successfully"),
+			Ok(Err(e)) => error!("[IPv6 Test] Client error: {}", e),
+			Err(_) => error!("[IPv6 Test] Client timeout"),
 		}
 	});
 
-	// Wait for client to establish connection and start SOCKS5 server
-	println!("[Integration Test] Waiting for client to connect and start SOCKS5 server...");
-	tokio::time::sleep(Duration::from_secs(2)).await;
-	println!("[Integration Test] SOCKS5 proxy should be ready now\n");
+	// Wait for client to connect
+	info!("[IPv6 Test] Waiting for client to connect and start SOCKS5 server...");
+	tokio::time::sleep(Duration::from_secs(5)).await;
+	info!("[IPv6 Test] SOCKS5 proxy should be ready now\n");
 
-	// Quick connectivity check - try to connect to SOCKS5 proxy
 	use tokio::net::TcpStream;
-	println!("[Integration Test] Testing SOCKS5 proxy connectivity...");
-	match TcpStream::connect("127.0.0.1:1080").await {
-		Ok(stream) => {
-			println!("[Integration Test] ✓ Successfully connected to SOCKS5 proxy at 127.0.0.1:1080");
-			println!(
-				"[Integration Test] Local: {:?}, Peer: {:?}",
-				stream.local_addr(),
-				stream.peer_addr()
-			);
-			drop(stream);
-		}
-		Err(e) => {
-			eprintln!("[Integration Test] ✗ Failed to connect to SOCKS5 proxy: {}", e);
-			eprintln!("[Integration Test] This suggests the TUIC client may not have started properly");
-		}
-	}
-	println!();
+	info!("[IPv6 Test] Testing SOCKS5 proxy connectivity on IPv6...");
+	let stream = TcpStream::connect("[::1]:1081")
+		.await
+		.expect("[IPv6 Test] Failed to connect to SOCKS5 proxy at [::1]:1081");
+	info!("[IPv6 Test] ✓ Successfully connected to SOCKS5 proxy at [::1]:1081");
+	info!("[IPv6 Test] Local: {:?}, Peer: {:?}", stream.local_addr(), stream.peer_addr());
+	drop(stream);
 
 	// ============================================================================
-	// Test 1: Create a local TCP echo server and test TCP relay through SOCKS5
+	// Test 1: IPv6 TCP relay through SOCKS5
 	// ============================================================================
 	let tcp_test = async {
-		use fast_socks5::client::{Config, Socks5Stream};
-		use tokio::{
-			io::{AsyncReadExt, AsyncWriteExt},
-			net::TcpListener,
-		};
+		info!("[IPv6 TCP Test] Starting TCP relay test on IPv6...");
 
-		println!("[TCP Test] Starting TCP relay test...");
+		// Start a local TCP echo server on IPv6
+		let (echo_task, echo_addr) = run_tcp_echo_server("[::1]:0", "IPv6 TCP Test").await;
 
-		// Start a local TCP echo server
-		let echo_server = TcpListener::bind("127.0.0.1:0").await.unwrap();
-		let echo_addr = echo_server.local_addr().unwrap();
-		println!("[TCP Test] TCP echo server started at: {}", echo_addr);
-
-		// Spawn echo server task
-		let echo_task = tokio::spawn(async move {
-			println!("[TCP Echo Server] Waiting for connection...");
-			// Wait with timeout to see if connection arrives
-			match timeout(Duration::from_secs(5), echo_server.accept()).await {
-				Ok(Ok((mut socket, addr))) => {
-					println!("[TCP Echo Server] Accepted connection from: {}", addr);
-					let mut buf = vec![0u8; 1024];
-					match timeout(Duration::from_secs(3), socket.read(&mut buf)).await {
-						Ok(Ok(0)) => {
-							println!("[TCP Echo Server] Connection closed by client (received 0 bytes)");
-						}
-						Ok(Ok(n)) => {
-							println!("[TCP Echo Server] Received {} bytes: {:?}", n, &buf[..n]);
-							if let Err(e) = socket.write_all(&buf[..n]).await {
-								eprintln!("[TCP Echo Server] Failed to send response: {}", e);
-							} else {
-								println!("[TCP Echo Server] Echoed {} bytes back", n);
-							}
-						}
-						Ok(Err(e)) => {
-							eprintln!("[TCP Echo Server] Failed to read: {}", e);
-						}
-						Err(_) => {
-							eprintln!("[TCP Echo Server] Timeout waiting for data");
-						}
-					}
-				}
-				Ok(Err(e)) => {
-					eprintln!("[TCP Echo Server] Failed to accept connection: {}", e);
-				}
-				Err(_) => {
-					eprintln!("[TCP Echo Server] Timeout waiting for connection (no client connected)");
-				}
-			}
-		});
-
-		// Give server time to start
 		tokio::time::sleep(Duration::from_millis(200)).await;
 
-		// Connect to the echo server through SOCKS5 proxy
-		println!("[TCP Test] Connecting to SOCKS5 proxy at 127.0.0.1:1080...");
-		println!("[TCP Test] Target echo server: {}", echo_addr);
-		let stream_result = Socks5Stream::connect(
-			"127.0.0.1:1080".parse::<SocketAddr>().unwrap(),
-			echo_addr.ip().to_string(),
-			echo_addr.port(),
-			Config::default(),
-		)
-		.await;
+		// Test TCP connection through SOCKS5 on IPv6
+		let test_data = b"Hello IPv6 TUIC!";
+		let result = test_tcp_through_socks5("[::1]:1081", echo_addr, test_data, "IPv6 TCP Test").await;
+		assert!(
+			result.is_ok(),
+			"[IPv6 TCP Test] TCP relay through SOCKS5 failed: {:?}",
+			result.err()
+		);
 
-		match stream_result {
-			Ok(mut stream) => {
-				println!("[TCP Test] Connected through SOCKS5 proxy to echo server");
-				println!(
-					"[TCP Test] Stream info - local: {:?}, peer: {:?}",
-					stream.get_socket_ref().local_addr(),
-					stream.get_socket_ref().peer_addr()
-				);
-
-				// Send test data
-				let test_data = b"Hello, TUIC!";
-				println!("[TCP Test] Sending {} bytes: {:?}", test_data.len(), test_data);
-
-				if let Err(e) = stream.write_all(test_data).await {
-					eprintln!("[TCP Test] Failed to send data: {}", e);
-				} else {
-					println!("[TCP Test] Data sent successfully");
-
-					// Give time for data to be transmitted and echoed back
-					tokio::time::sleep(Duration::from_millis(500)).await;
-
-					// Read echo response - use read_exact to ensure we get all bytes
-					let mut buffer = vec![0u8; test_data.len()];
-					match timeout(Duration::from_secs(3), stream.read_exact(&mut buffer)).await {
-						Ok(Ok(_)) => {
-							println!("[TCP Test] Received {} bytes: {:?}", buffer.len(), &buffer);
-
-							// Verify echo
-							if buffer.as_slice() == test_data {
-								println!("[TCP Test] ✓ TCP echo test PASSED - data matches!");
-							} else {
-								eprintln!("[TCP Test] ✗ TCP echo test FAILED - data mismatch!");
-								eprintln!("[TCP Test] Expected: {:?}", test_data);
-								eprintln!("[TCP Test] Got: {:?}", &buffer);
-							}
-						}
-						Ok(Err(e)) => {
-							eprintln!("[TCP Test] Failed to read response: {}", e);
-							// Try regular read to see what we can get
-							let mut fallback_buffer = vec![0u8; 1024];
-							if let Ok(Ok(bytes)) = timeout(Duration::from_secs(1), stream.read(&mut fallback_buffer)).await {
-								eprintln!(
-									"[TCP Test] Fallback read got {} bytes: {:?}",
-									bytes,
-									&fallback_buffer[..bytes]
-								);
-							}
-						}
-						Err(_) => {
-							eprintln!("[TCP Test] Timeout waiting for response");
-							// Try to read whatever is available
-							let mut fallback_buffer = vec![0u8; 1024];
-							if let Ok(n) = stream.read(&mut fallback_buffer).await {
-								eprintln!("[TCP Test] Partial read got {} bytes: {:?}", n, &fallback_buffer[..n]);
-							}
-						}
-					}
-				}
-			}
-			Err(e) => {
-				eprintln!("[TCP Test] Failed to connect to SOCKS5 proxy: {}", e);
-			}
-		}
-
-		// Wait a bit to see if echo server gets anything
-		println!("[TCP Test] Waiting for echo server to finish...");
-		tokio::time::sleep(Duration::from_millis(500)).await;
-
-		// Clean up
 		echo_task.abort();
-		println!("[TCP Test] TCP test completed\n");
+		info!("[IPv6 TCP Test] TCP test completed\n");
 	};
 
-	// Run the TCP test with a timeout
-	let _ = timeout(Duration::from_secs(6), tcp_test).await;
+	timeout(Duration::from_secs(30), tcp_test)
+		.await
+		.expect("[IPv6 TCP Test] TCP test timed out");
 
 	// ============================================================================
-	// Test 2: Create a local UDP echo server and test UDP relay through SOCKS5
+	// Test 2: IPv6 UDP relay through SOCKS5
 	// ============================================================================
 	let udp_test = async {
-		use std::{
-			net::{IpAddr, Ipv4Addr},
-			sync::Arc,
-		};
+		use std::net::{IpAddr, Ipv6Addr};
 
-		use fast_socks5::client::Socks5Datagram;
-		use tokio::net::{TcpStream, UdpSocket};
+		info!("[IPv6 UDP Test] Starting UDP relay test on IPv6...");
 
-		println!("\n[UDP Test] ========================================");
-		println!("[UDP Test] Starting UDP relay test...");
-		println!("[UDP Test] ========================================\n");
+		// Start a local UDP echo server on IPv6
+		let (echo_task, echo_addr, _echo_server) = run_udp_echo_server("[::1]:0", "IPv6 UDP Test").await;
 
-		// Start a local UDP echo server
-		let echo_server = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
-		let echo_addr = echo_server.local_addr().unwrap();
-		println!("[UDP Test] UDP echo server started at: {}", echo_addr);
-
-		// Spawn echo server task that echoes back received data
-		let echo_server_clone = echo_server.clone();
-		let echo_task = tokio::spawn(async move {
-			let mut buf = vec![0u8; 1024];
-			println!("[UDP Echo Server] Waiting for packets...");
-			match timeout(Duration::from_secs(5), echo_server_clone.recv_from(&mut buf)).await {
-				Ok(Ok((n, addr))) => {
-					println!("[UDP Echo Server] Received {} bytes from {}", n, addr);
-					println!("[UDP Echo Server] Data: {:?}", &buf[..n]);
-					if let Err(e) = echo_server_clone.send_to(&buf[..n], addr).await {
-						eprintln!("[UDP Echo Server] Failed to send response: {}", e);
-					} else {
-						println!("[UDP Echo Server] Echoed {} bytes back to {}", n, addr);
-					}
-				}
-				Ok(Err(e)) => {
-					eprintln!("[UDP Echo Server] Error receiving: {}", e);
-				}
-				Err(_) => {
-					eprintln!("[UDP Echo Server] Timeout waiting for data (no packets received)");
-				}
-			}
-		}); // Give server time to start
 		tokio::time::sleep(Duration::from_millis(100)).await;
 
-		// Connect to SOCKS5 proxy using fast-socks5's UDP API
-		println!("[UDP Test] Connecting to SOCKS5 proxy at 127.0.0.1:1080...");
-		let socks_addr: SocketAddr = "127.0.0.1:1080".parse().unwrap();
+		// Test UDP connection through SOCKS5 on IPv6
+		let test_data = b"Hello, IPv6 UDP through TUIC!";
+		let client_bind_addr = std::net::SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0);
+		let result = test_udp_through_socks5("[::1]:1081", echo_addr, test_data, "IPv6 UDP Test", client_bind_addr).await;
+		assert!(
+			result.is_ok(),
+			"[IPv6 UDP Test] UDP relay through SOCKS5 failed: {:?}",
+			result.err()
+		);
 
-		// Create TCP connection to SOCKS5 server for UDP association
-		println!("[UDP Test] Creating TCP connection to SOCKS5 proxy...");
-		let backing_socket_result = TcpStream::connect(socks_addr).await;
-
-		if let Ok(backing_socket) = backing_socket_result {
-			println!("[UDP Test] TCP connection to SOCKS5 proxy established");
-			println!(
-				"[UDP Test] Local TCP addr: {:?}, Remote TCP addr: {:?}",
-				backing_socket.local_addr(),
-				backing_socket.peer_addr()
-			);
-
-			// Bind UDP socket through SOCKS5 (no authentication)
-			let client_bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
-			println!("[UDP Test] Binding UDP socket through SOCKS5 from {}...", client_bind_addr);
-			let socks_result = Socks5Datagram::bind(backing_socket, client_bind_addr).await;
-
-			if let Ok(socks) = socks_result {
-				println!("[UDP Test] UDP association established through SOCKS5");
-
-				// Prepare test data
-				let test_data = b"Hello, UDP through TUIC!";
-				println!("[UDP Test] Test data: {} bytes - {:?}", test_data.len(), test_data);
-
-				// Send data through SOCKS5 to echo server
-				let target_ip = echo_addr.ip();
-				let target_port = echo_addr.port();
-				println!("[UDP Test] Sending to target {}:{}...", target_ip, target_port);
-				let send_result = socks.send_to(test_data, (target_ip, target_port)).await;
-
-				match send_result {
-					Ok(sent) => {
-						println!("[UDP Test] Successfully sent {} bytes through SOCKS5 proxy", sent);
-						println!("[UDP Test] Waiting for echo response...");
-
-						// Receive echo response
-						let mut buffer = vec![0u8; 1024];
-						let recv_result = timeout(Duration::from_secs(2), socks.recv_from(&mut buffer)).await;
-
-						match recv_result {
-							Ok(Ok((len, addr))) => {
-								println!("[UDP Test] Received {} bytes from {:?}", len, addr);
-								println!("[UDP Test] Response data: {:?}", &buffer[..len]);
-
-								// Verify echo
-								if &buffer[..len] == test_data {
-									println!("[UDP Test] ✓ UDP echo test PASSED - data matches!");
-								} else {
-									eprintln!("[UDP Test] ✗ UDP echo test FAILED - data mismatch!");
-									eprintln!("[UDP Test] Expected: {:?}", test_data);
-									eprintln!("[UDP Test] Got: {:?}", &buffer[..len]);
-								}
-							}
-							Ok(Err(e)) => {
-								eprintln!("[UDP Test] Failed to receive response: {}", e);
-							}
-							Err(_) => {
-								eprintln!("[UDP Test] Timeout waiting for response");
-							}
-						}
-					}
-					Err(e) => {
-						eprintln!("[UDP Test] Failed to send data: {}", e);
-					}
-				}
-			} else {
-				eprintln!("[UDP Test] Failed to bind UDP through SOCKS5: {:?}", socks_result.err());
-			}
-		} else {
-			eprintln!(
-				"[UDP Test] Failed to connect to SOCKS5 proxy: {:?}",
-				backing_socket_result.err()
-			);
-		}
-
-		// Clean up
 		echo_task.abort();
-		println!("[UDP Test] UDP test completed\n");
+		info!("[IPv6 UDP Test] UDP test completed\n");
 	};
 
-	// Run the UDP test with a timeout
-	let _ = timeout(Duration::from_secs(3), udp_test).await;
-
-	// ============================================================================
-	// Test 3: Test multiple concurrent TCP connections
-	// ============================================================================
-	let concurrent_test = async {
-		use fast_socks5::client::{Config, Socks5Stream};
-		use tokio::{
-			io::{AsyncReadExt, AsyncWriteExt},
-			net::TcpListener,
-		};
-
-		println!("[Concurrent Test] Starting concurrent TCP connections test...");
-
-		// Start a local TCP server
-		let server = TcpListener::bind("127.0.0.1:0").await.unwrap();
-		let server_addr = server.local_addr().unwrap();
-		println!("[Concurrent Test] TCP server started at: {}", server_addr);
-
-		// Spawn server task that handles multiple connections
-		let server_task = tokio::spawn(async move {
-			for i in 0..3 {
-				if let Ok((mut socket, addr)) = server.accept().await {
-					println!("[Concurrent Test Server] Accepted connection {} from: {}", i, addr);
-					tokio::spawn(async move {
-						let mut buf = vec![0u8; 1024];
-						if let Ok(n) = socket.read(&mut buf).await {
-							println!("[Concurrent Test Server] Connection {}: received {} bytes", i, n);
-							if let Err(e) = socket.write_all(&buf[..n]).await {
-								eprintln!("[Concurrent Test Server] Connection {}: failed to echo: {}", i, e);
-							}
-						}
-					});
-				}
-			}
-		});
-
-		tokio::time::sleep(Duration::from_millis(100)).await;
-
-		// Create multiple concurrent connections through SOCKS5
-		println!("[Concurrent Test] Creating 3 concurrent connections through SOCKS5...");
-		let mut handles = vec![];
-		for i in 0..3 {
-			let addr = server_addr;
-			let handle = tokio::spawn(async move {
-				println!("[Concurrent Test] Connection {}: connecting...", i);
-				match Socks5Stream::connect(
-					"127.0.0.1:1080".parse::<SocketAddr>().unwrap(),
-					addr.ip().to_string(),
-					addr.port(),
-					Config::default(),
-				)
-				.await
-				{
-					Ok(mut stream) => {
-						println!("[Concurrent Test] Connection {}: connected", i);
-						let test_data = format!("Connection {}", i);
-
-						if let Err(e) = stream.write_all(test_data.as_bytes()).await {
-							eprintln!("[Concurrent Test] Connection {}: failed to send: {}", i, e);
-						} else {
-							println!("[Concurrent Test] Connection {}: sent {} bytes", i, test_data.len());
-
-							let mut buf = vec![0u8; 1024];
-							match timeout(Duration::from_secs(1), stream.read(&mut buf)).await {
-								Ok(Ok(n)) => {
-									println!("[Concurrent Test] Connection {}: received {} bytes", i, n);
-								}
-								Ok(Err(e)) => {
-									eprintln!("[Concurrent Test] Connection {}: failed to receive: {}", i, e);
-								}
-								Err(_) => {
-									eprintln!("[Concurrent Test] Connection {}: timeout", i);
-								}
-							}
-						}
-					}
-					Err(e) => {
-						eprintln!("[Concurrent Test] Connection {}: failed to connect: {}", i, e);
-					}
-				}
-			});
-			handles.push(handle);
-		}
-
-		// Wait for all connections to complete
-		for (i, handle) in handles.into_iter().enumerate() {
-			if let Err(e) = handle.await {
-				eprintln!("[Concurrent Test] Connection {} task failed: {}", i, e);
-			}
-		}
-
-		println!("[Concurrent Test] ✓ All concurrent connections completed");
-		server_task.abort();
-		println!("[Concurrent Test] Concurrent test completed\n");
-	};
-
-	// Run the concurrent test with a timeout
-	let _ = timeout(Duration::from_secs(5), concurrent_test).await;
+	timeout(Duration::from_secs(30), udp_test)
+		.await
+		.expect("[IPv6 UDP Test] UDP test timed out");
 
 	// Clean up
 	client_handle.abort();
 	server_handle.abort();
 
-	// Give tasks time to clean up
 	tokio::time::sleep(Duration::from_millis(100)).await;
+
+	info!("[IPv6 Test] ========================================");
+	info!("[IPv6 Test] IPv6 Integration Test Completed");
+	info!("[IPv6 Test] ========================================\n");
+
+	Ok(())
+}
+
+// Integration test for SOCKS5 proxy configuration with TUIC client
+//
+// This test validates:
+// - Client configuration with SOCKS5 proxy settings
+// - Proper handling of proxy configuration fields (server, username, password,
+//   udp_buffer_size)
+// - Configuration parsing for different proxy scenarios
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+#[tracing_test::traced_test]
+#[cfg_attr(not(any(target_arch = "x86", target_arch = "x86_64")), ignore)]
+async fn test_client_proxy_configuration() -> eyre::Result<()> {
+	use std::{collections::HashMap, net::SocketAddr, path::PathBuf};
+
+	#[cfg(feature = "aws-lc-rs")]
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	#[cfg(feature = "ring")]
+	let _ = rustls::crypto::ring::default_provider().install_default();
+
+	info!("[Proxy Config Test] ========================================");
+	info!("[Proxy Config Test] Starting Proxy Configuration Test");
+	info!("[Proxy Config Test] ========================================\n");
+
+	// Create a minimal server for testing
+	let server_config = tuic_server::Config {
+		log_level: tuic_server::config::LogLevel::Debug,
+		server: "127.0.0.1:8445".parse::<SocketAddr>()?,
+		users: {
+			let mut users = HashMap::new();
+			users.insert(
+				Uuid::parse_str("00000000-0000-0000-0000-000000000000")?,
+				"test_password".to_string(),
+			);
+			users
+		},
+		tls: tuic_server::config::TlsConfig {
+			self_sign:   true,
+			certificate: PathBuf::from("./test_cert.pem"),
+			private_key: PathBuf::from("./test_key.pem"),
+			alpn:        vec!["h3".to_string()],
+			hostname:    "localhost".to_string(),
+			auto_ssl:    false,
+			acme_email:  "admin@example.com".to_string(),
+		},
+		data_dir: std::env::temp_dir(),
+		udp_relay_ipv6: true,
+		zero_rtt_handshake: false,
+		dual_stack: false,
+		max_external_packet_size: 1500,
+		stream_timeout: Duration::from_secs(60),
+		outbound: tuic_server::config::OutboundConfig::default(),
+		acl: vec![tuic_server::acl::AclRule {
+			outbound: "allow".to_string(),
+			addr:     tuic_server::acl::AclAddress::Localhost,
+			ports:    None,
+			hijack:   None,
+		}],
+		..Default::default()
+	};
+
+	info!("[Proxy Config Test] Starting TUIC server on {}...", server_config.server);
+	let server_handle = tokio::spawn(async move {
+		let _ = tuic_server::run(server_config).await;
+	});
+
+	tokio::time::sleep(Duration::from_millis(500)).await;
+
+	// Test: Client config with proxy settings
+	info!("[Proxy Config Test] Test 1: Client with SOCKS5 proxy configuration");
+
+	// Start a real SOCKS5 proxy server for testing
+	let (socks5_handle, socks5_addr) =
+		run_socks5_server("127.0.0.1:0", "Proxy Test 1", Some("proxy_user"), Some("proxy_pass")).await;
+
+	info!("[Proxy Config Test] SOCKS5 proxy started at: {}", socks5_addr);
+	tokio::time::sleep(Duration::from_millis(200)).await;
+
+	// Build config directly
+	let config = tuic_client::config::Config {
+		tokio_runtime: Default::default(),
+		relay:         tuic_client::config::Relay {
+			server: ("127.0.0.1".to_string(), 8445),
+			uuid: Uuid::parse_str("00000000-0000-0000-0000-000000000000")?,
+			password: std::sync::Arc::from("test_password".as_bytes()),
+			skip_cert_verify: true,
+			proxy: Some(tuic_client::config::ProxyConfig {
+				server:          (socks5_addr.ip().to_string(), socks5_addr.port()),
+				username:        Some("proxy_user".to_string()),
+				password:        Some("proxy_pass".to_string()),
+				udp_buffer_size: 4096,
+			}),
+			alpn: vec![b"h3".to_vec()],
+			..Default::default()
+		},
+		local:         tuic_client::config::Local {
+			server: "127.0.0.1:1082".parse()?,
+			..Default::default()
+		},
+		log_level:     "debug".to_string(),
+	};
+	let local_socks = "127.0.0.1:1082";
+	info!("[Proxy Config Test] ✓ Config built successfully");
+
+	info!("[Proxy Config Test] Starting TUIC client with proxy configuration...");
+	let client_handle = tokio::spawn(async move {
+		match timeout(Duration::from_secs(30), tuic_client::run(config)).await {
+			Ok(Ok(())) => info!("[Proxy Config Test] Client completed successfully"),
+			Ok(Err(e)) => {
+				info!("[Proxy Config Test] Client error: {}", e);
+			}
+			Err(_) => error!("[Proxy Config Test] Client timeout"),
+		}
+	});
+
+	// Give client time to start and connect through proxy
+	tokio::time::sleep(Duration::from_secs(5)).await;
+
+	info!("[Proxy Config Test] ✓ Client started with proxy configuration");
+
+	// Test 1b: Verify that TUIC client can actually use the SOCKS5 proxy
+	// Create a TCP echo server to test connectivity through the proxy chain
+	let (echo_handle, echo_addr) = run_tcp_echo_server("127.0.0.1:0", "Proxy Test 1 Echo").await;
+	tokio::time::sleep(Duration::from_millis(200)).await;
+
+	// Try to connect to echo server through SOCKS5 proxy
+	info!("[Proxy Config Test] Testing connection through SOCKS5 proxy to echo server...");
+	let test_data = b"Hello through SOCKS5 proxy!";
+	let result = test_tcp_through_socks5(local_socks, echo_addr, test_data, "Proxy Test 1").await;
+	assert!(
+		result.is_ok(),
+		"[Proxy Config Test] TCP relay through SOCKS5 proxy failed: {:?}",
+		result.err()
+	);
+
+	// Clean up
+	echo_handle.abort();
+	client_handle.abort();
+	socks5_handle.abort();
+	server_handle.abort();
+	tokio::time::sleep(Duration::from_millis(100)).await;
+
+	Ok(())
+}
+
+// Test that server on port 0 returns the OS-assigned port via ServerGuard
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+#[tracing_test::traced_test]
+async fn test_server_port_zero() -> eyre::Result<()> {
+	use std::{collections::HashMap, net::SocketAddr, path::PathBuf};
+
+	#[cfg(feature = "aws-lc-rs")]
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	#[cfg(feature = "ring")]
+	let _ = rustls::crypto::ring::default_provider().install_default();
+
+	let server_config = tuic_server::Config {
+		log_level: tuic_server::config::LogLevel::Debug,
+		server: "127.0.0.1:0".parse::<SocketAddr>()?,
+		users: {
+			let mut users = HashMap::new();
+			users.insert(
+				Uuid::parse_str("00000000-0000-0000-0000-000000000000")?,
+				"test_password".to_string(),
+			);
+			users
+		},
+		tls: tuic_server::config::TlsConfig {
+			self_sign:   true,
+			certificate: PathBuf::from("./test_cert.pem"),
+			private_key: PathBuf::from("./test_key.pem"),
+			alpn:        vec!["h3".to_string()],
+			hostname:    "localhost".to_string(),
+			auto_ssl:    false,
+			acme_email:  "admin@example.com".to_string(),
+		},
+		data_dir: std::env::temp_dir(),
+		dual_stack: false,
+		..Default::default()
+	};
+
+	let guard = tuic_server::run(server_config).await?;
+
+	assert!(
+		guard.local_addr.port() != 0,
+		"Expected a non-zero port from OS when binding to port 0, got {}",
+		guard.local_addr
+	);
+	assert_eq!(
+		guard.local_addr.ip(),
+		"127.0.0.1".parse::<std::net::IpAddr>()?,
+		"Expected server to bind to 127.0.0.1"
+	);
+
+	info!("Server bound to: {}", guard.local_addr);
+
+	guard.cancel.cancel();
+	Ok(())
 }

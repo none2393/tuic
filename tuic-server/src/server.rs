@@ -5,23 +5,25 @@ use std::{
 };
 
 use eyre::Context;
-use quinn::{
-	Endpoint, EndpointConfig, IdleTimeout, ServerConfig, TokioRuntime, TransportConfig, VarInt,
-	congestion::{BbrConfig, CubicConfig, NewRenoConfig},
-	crypto::rustls::QuicServerConfig,
-};
 use rustls::{
 	ServerConfig as RustlsServerConfig,
 	pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
 };
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use tracing::{debug, info, warn};
+use tuic_core::quinn::{
+	Endpoint, EndpointConfig, IdleTimeout, ServerConfig, TokioRuntime, TransportConfig, VarInt,
+	bbr::BbrConfig,
+	congestion::{Bbr3Config, CubicConfig, NewRenoConfig},
+	crypto::rustls::QuicServerConfig,
+};
 
 use crate::{
 	AppContext,
+	acme::{is_valid_domain, start_acme},
 	connection::{Connection, INIT_CONCURRENT_STREAMS},
 	error::Error,
-	tls::{CertResolver, is_certificate_valid, is_valid_domain, provision_acme_certificate, start_certificate_renewal_task},
+	tls::CertResolver,
 	utils::CongestionController,
 };
 
@@ -31,63 +33,34 @@ pub struct Server {
 }
 
 impl Server {
+	pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+		self.ep.local_addr()
+	}
+
 	pub async fn init(ctx: Arc<AppContext>) -> Result<Self, Error> {
 		let mut crypto: RustlsServerConfig;
 		let hostname = ctx.cfg.tls.hostname.clone();
+		let acme_email = ctx.cfg.tls.acme_email.clone();
 
 		if ctx.cfg.tls.auto_ssl && is_valid_domain(hostname.as_str()) {
 			warn!("Attempting automatic SSL certificate provisioning for domain: {}", hostname);
-			let cert_path = ctx.cfg.tls.certificate.clone();
-			let key_path = ctx.cfg.tls.private_key.clone();
+			let cache_dir = ctx.cfg.data_dir.join("acme");
 
-			if is_certificate_valid(&cert_path).await {
-				info!("Existing ACME certificate is valid, using it instead of provisioning new one");
-
-				// Use existing valid ACME certificate
-				let cert_resolver = CertResolver::new(&cert_path, &key_path, Duration::from_secs(30)).await?;
-
-				crypto = RustlsServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-					.with_no_client_auth()
-					.with_cert_resolver(cert_resolver);
-
-				// Start certificate renewal background task for existing certificate
-				start_certificate_renewal_task(hostname.clone(), cert_path.clone(), key_path.clone()).await;
-			} else {
-				info!("No valid ACME certificate found, will provision new one");
-
-				// Attempt ACME certificate provisioning
-				match provision_acme_certificate(hostname.as_str(), &cert_path, &key_path, 2).await {
-					Ok(()) => {
-						warn!("Successfully provisioned ACME certificate for {}", hostname);
-
-						// Start certificate renewal background task
-						start_certificate_renewal_task(hostname.clone(), cert_path.clone(), key_path.clone()).await;
-
-						// Use the provisioned certificate
-						let cert_resolver = CertResolver::new(&cert_path, &key_path, Duration::from_secs(30)).await?;
-
-						crypto = RustlsServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-							.with_no_client_auth()
-							.with_cert_resolver(cert_resolver);
-					}
-					Err(e) => {
-						warn!("ACME certificate provisioning failed after 2 attempts: {}", e);
-						warn!("Falling back to self-signed certificate");
-
-						let cert = rcgen::generate_simple_self_signed(vec![hostname.clone()]).unwrap();
-						let cert_pem = cert.cert.pem();
-						let cert_der = CertificateDer::from(cert.cert);
-						let priv_key = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
-						if let Err(e) = tokio::fs::write(&cert_path, cert_pem).await {
-							warn!("Failed to write certificate to disk: {}", e);
-						}
-						if let Err(e) = tokio::fs::write(&key_path, cert.signing_key.serialize_pem()).await {
-							warn!("Failed to write key to disk: {}", e);
-						}
-						crypto = RustlsServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-							.with_no_client_auth()
-							.with_single_cert(vec![cert_der], PrivateKeyDer::Pkcs8(priv_key))?;
-					}
+			match start_acme(ctx.clone(), hostname.as_str(), acme_email.as_str(), &cache_dir).await {
+				Ok(resolver) => {
+					info!("ACME certificate management active for {}", hostname);
+					crypto = RustlsServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+						.with_no_client_auth()
+						.with_cert_resolver(resolver);
+				}
+				Err(e) => {
+					warn!("ACME setup failed: {e}, falling back to self-signed certificate");
+					let cert = rcgen::generate_simple_self_signed(vec![hostname.clone()]).unwrap();
+					let cert_der = CertificateDer::from(cert.cert);
+					let priv_key = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
+					crypto = RustlsServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+						.with_no_client_auth()
+						.with_single_cert(vec![cert_der], PrivateKeyDer::Pkcs8(priv_key))?;
 				}
 			}
 		} else if ctx.cfg.tls.self_sign {
@@ -144,6 +117,11 @@ impl Server {
 				let mut new_reno = NewRenoConfig::default();
 				new_reno.initial_window(ctx.cfg.quic.congestion_control.initial_window);
 				tp_cfg.congestion_controller_factory(Arc::new(new_reno))
+			}
+			CongestionController::Bbr3 => {
+				let mut bbr3_config = Bbr3Config::default();
+				bbr3_config.initial_window(ctx.cfg.quic.congestion_control.initial_window);
+				tp_cfg.congestion_controller_factory(Arc::new(bbr3_config))
 			}
 		};
 

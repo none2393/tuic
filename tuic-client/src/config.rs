@@ -72,6 +72,40 @@ pub struct Config {
 
 	#[educe(Default = "info")]
 	pub log_level: String,
+
+	#[educe(Default(expression = TokioRuntime::Auto))]
+	pub tokio_runtime: TokioRuntime,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TokioRuntime {
+	#[default]
+	Auto,
+	MultiThread,
+	CurrentThread,
+}
+
+impl TokioRuntime {
+	pub fn resolve(self) -> ResolvedRuntime {
+		match self {
+			TokioRuntime::MultiThread => ResolvedRuntime::MultiThread,
+			TokioRuntime::CurrentThread => ResolvedRuntime::CurrentThread,
+			TokioRuntime::Auto => {
+				if num_cpus::get() <= 2 {
+					ResolvedRuntime::CurrentThread
+				} else {
+					ResolvedRuntime::MultiThread
+				}
+			}
+		}
+	}
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ResolvedRuntime {
+	MultiThread,
+	CurrentThread,
 }
 
 #[derive(Debug, Deserialize, serde::Serialize, Educe)]
@@ -113,9 +147,15 @@ pub struct Relay {
 	#[educe(Default = false)]
 	pub disable_sni: bool,
 
+	#[educe(Default = None)]
+	pub sni: Option<String>,
+
 	#[educe(Default(expression = Duration::from_secs(8)))]
 	#[serde(with = "humantime_serde")]
 	pub timeout: Duration,
+
+	#[educe(Default(expression = StartupMode::Lazy))]
+	pub startup_mode: StartupMode,
 
 	#[educe(Default(expression = Duration::from_secs(3)))]
 	#[serde(with = "humantime_serde")]
@@ -152,6 +192,36 @@ pub struct Relay {
 
 	#[educe(Default = false)]
 	pub skip_cert_verify: bool,
+
+	#[educe(Default = None)]
+	pub proxy: Option<ProxyConfig>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum StartupMode {
+	Eager,
+	#[default]
+	Lazy,
+	Loop,
+}
+
+#[derive(Debug, Deserialize, serde::Serialize, Educe, Clone, PartialEq, Eq)]
+#[educe(Default)]
+#[serde(deny_unknown_fields, default)]
+pub struct ProxyConfig {
+	#[serde(deserialize_with = "deserialize_server")]
+	#[educe(Default(expression = ("".to_string(), 0)))]
+	pub server: (String, u16),
+
+	#[educe(Default = None)]
+	pub username: Option<String>,
+
+	#[educe(Default = None)]
+	pub password: Option<String>,
+
+	#[educe(Default = 2048)]
+	pub udp_buffer_size: usize,
 }
 
 #[derive(Debug, Deserialize, serde::Serialize, Educe)]
@@ -334,6 +404,11 @@ where
 
 	let port = port.parse().map_err(DeError::custom)?;
 	s.truncate(domain.len());
+
+	// Strip brackets from IPv6 addresses (e.g., "[::1]" -> "::1")
+	if s.starts_with('[') && s.ends_with(']') {
+		s = s[1..s.len() - 1].to_string();
+	}
 
 	Ok((s, port))
 }
@@ -536,6 +611,7 @@ mod tests {
 		assert!(!config.relay.zero_rtt_handshake);
 		assert!(!config.relay.disable_sni);
 		assert_eq!(config.relay.timeout, Duration::from_secs(8));
+		assert_eq!(config.relay.startup_mode, StartupMode::Lazy);
 		assert_eq!(config.relay.heartbeat, Duration::from_secs(3));
 		assert!(!config.relay.disable_native_certs);
 		assert_eq!(config.relay.send_window, 16 * 1024 * 1024);
@@ -548,6 +624,41 @@ mod tests {
 		assert_eq!(config.relay.gc_lifetime, Duration::from_secs(15));
 		assert!(!config.relay.skip_cert_verify);
 		assert_eq!(config.local.max_packet_size, 1500);
+	}
+
+	#[test]
+	fn test_startup_mode_string_values() {
+		let json5_config = r#"
+		{
+			relay: {
+				server: "example.com:443",
+				uuid: "00000000-0000-0000-0000-000000000000",
+				password: "test",
+				startup_mode: "loop",
+			},
+			local: { server: "127.0.0.1:1080" },
+		}
+		"#;
+
+		let config = test_parse_config(json5_config, ".json5").unwrap();
+		assert_eq!(config.relay.startup_mode, StartupMode::Loop);
+	}
+
+	#[test]
+	fn test_startup_mode_eager() {
+		let toml_config = r#"
+		[relay]
+		server = "example.com:443"
+		uuid = "00000000-0000-0000-0000-000000000000"
+		password = "test"
+		startup_mode = "eager"
+
+		[local]
+		server = "127.0.0.1:1080"
+		"#;
+
+		let config = test_parse_config(toml_config, ".toml").unwrap();
+		assert_eq!(config.relay.startup_mode, StartupMode::Eager);
 	}
 	#[test]
 	fn test_tcp_udp_forward() {
@@ -592,6 +703,93 @@ mod tests {
 		assert_eq!(config.relay.alpn[0], b"h3".to_vec());
 		assert_eq!(config.relay.alpn[1], b"h2".to_vec());
 		assert_eq!(config.relay.alpn[2], b"http/1.1".to_vec());
+	}
+
+	#[test]
+	fn test_proxy_config() {
+		let toml_config = r#"
+[relay]
+server = "example.com:443"
+uuid = "00000000-0000-0000-0000-000000000000"
+password = "pass"
+[relay.proxy]
+server = "127.0.0.1:1080"
+username = "user"
+password = "pwd"
+
+[local]
+server = "127.0.0.1:1081"
+"#;
+		let config = test_parse_config(toml_config, ".toml").unwrap();
+		let proxy = config.relay.proxy.unwrap();
+		assert_eq!(proxy.server.0, "127.0.0.1");
+		assert_eq!(proxy.server.1, 1080);
+		assert_eq!(proxy.username.unwrap(), "user");
+		assert_eq!(proxy.password.unwrap(), "pwd");
+	}
+
+	#[test]
+	fn test_proxy_config_json5() {
+		let json5_config = include_str!("../tests/config/proxy_json5.json5");
+
+		let config = test_parse_config(json5_config, ".json5").unwrap();
+		let proxy = config.relay.proxy.unwrap();
+		assert_eq!(proxy.server.0, "127.0.0.1");
+		assert_eq!(proxy.server.1, 1080);
+		assert_eq!(proxy.username.unwrap(), "proxy_user");
+		assert_eq!(proxy.password.unwrap(), "proxy_pass");
+		assert_eq!(proxy.udp_buffer_size, 4096);
+	}
+
+	#[test]
+	fn test_proxy_config_yaml() {
+		let yaml_config = include_str!("../tests/config/proxy_yaml.yaml");
+
+		let config = test_parse_config(yaml_config, ".yaml").unwrap();
+		let proxy = config.relay.proxy.unwrap();
+		assert_eq!(proxy.server.0, "socks5.proxy.com");
+		assert_eq!(proxy.server.1, 1080);
+		assert_eq!(proxy.username.unwrap(), "yaml_user");
+		assert_eq!(proxy.password.unwrap(), "yaml_pass");
+		assert_eq!(proxy.udp_buffer_size, 8192);
+	}
+
+	#[test]
+	fn test_proxy_minimal_config() {
+		let toml_config = include_str!("../tests/config/proxy_minimal.toml");
+
+		let config = test_parse_config(toml_config, ".toml").unwrap();
+		let proxy = config.relay.proxy.unwrap();
+		assert_eq!(proxy.server.0, "proxy.example.com");
+		assert_eq!(proxy.server.1, 1080);
+		// username and password should be None when not provided
+		assert!(proxy.username.is_none());
+		assert!(proxy.password.is_none());
+		// Should use default udp_buffer_size
+		assert_eq!(proxy.udp_buffer_size, 2048);
+	}
+
+	#[test]
+	fn test_proxy_defaults() {
+		let json5_config = include_str!("../tests/config/proxy_defaults.json5");
+
+		let config = test_parse_config(json5_config, ".json5").unwrap();
+		let proxy = config.relay.proxy.unwrap();
+		assert_eq!(proxy.server.0, "127.0.0.1");
+		assert_eq!(proxy.server.1, 1080);
+		assert!(proxy.username.is_none());
+		assert!(proxy.password.is_none());
+		// Default udp_buffer_size should be 2048
+		assert_eq!(proxy.udp_buffer_size, 2048);
+	}
+
+	#[test]
+	fn test_no_proxy_config() {
+		let toml_config = include_str!("../tests/config/no_proxy.toml");
+
+		let config = test_parse_config(toml_config, ".toml").unwrap();
+		// proxy should be None when not configured
+		assert!(config.relay.proxy.is_none());
 	}
 
 	#[test]

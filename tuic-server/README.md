@@ -35,6 +35,9 @@ This fork includes advanced features such as Docker support, self-signed certifi
 - TLS support with auto-provisioning and self-signed certificates
 - RESTful API for monitoring and management
 - Docker and Docker Compose deployment options
+- Lock-free concurrent caches (moka) for UDP session management
+- Structured logging with configurable format, compact mode, and file rotation
+- Tracing spans for per-connection observability (id, addr, user)
 
 ---
 
@@ -79,6 +82,7 @@ docker run --name tuic-server \
   -v /PATH/TO/CERTIFICATE:/PATH/TO/CERTIFICATE \
   -v /PATH/TO/PRIVATE_KEY:/PATH/TO/PRIVATE_KEY \
   -dit ghcr.io/itsusinn/tuic-server:latest
+  ## or -dit docker.io/itsusinn/tuic-server:latest
 ```
 
 **Note:** The Docker image now uses `-d /etc/tuic` by default, allowing you to mount your config directory.
@@ -89,6 +93,7 @@ docker run --name tuic-server \
 services:
   tuic:
     image: ghcr.io/itsusinn/tuic-server:latest
+    ## or image: docker.io/itsusinn/tuic-server:latest
     restart: always
     container_name: tuic
     network_mode: host
@@ -141,6 +146,19 @@ gc_lifetime = "30s"
 max_external_packet_size = 1500
 # How long to preserve TCP and UDP I/O tasks
 stream_timeout = "60s"
+# Tokio runtime to use: auto, multi_thread, current_thread
+# auto: single-threaded when <= 2 CPUs, multi-threaded otherwise
+tokio_runtime = "auto"
+
+[log]
+# Log output format: text (default), json
+format = "text"
+# Compact format (single-line, less verbose). Only applies to text format
+compact = true
+# Optional log file path. When set, logs are also written to this file
+# log_file = "/var/log/tuic/server.log"
+# Rotation policy for log_file: never (default), hourly, daily
+# log_rotation = "daily"
 
 # Access Control List (ACL) rules - can be specified in two formats:
 
@@ -189,10 +207,28 @@ certificate = ""
 private_key = ""
 # ALPN protocols (e.g. ["h3"])
 alpn = []
-# Domain name for certificate issuance or self-sign
+# Domain name or IP address for certificate issuance or self-sign
 hostname = "localhost"
 # Enable built-in ACME automatic SSL certificate provisioning
 auto_ssl = false
+# (Optional) email for ACME account creation, if left empty, will use 'admin@<hostname>' or 'admin@<random_string>.com'
+acme_email = ""
+
+[camouflage]
+# Enable HTTP/3 camouflage mode for non-TUIC ALPN `h3*` traffic
+enabled = false
+# Reverse proxy target for camouflage requests
+# (usually an HTTP/2 or HTTP/1.1 web server endpoint)
+reverse_proxy_url = "https://127.0.0.1:443"
+# Optional backend server name. When set, it is used as:
+# 1) TLS SNI for backend connection
+# 2) HTTP Host header for backend request routing
+# Required only when reverse_proxy_url host is an IP address.
+reverse_proxy_hostname = "example.com"
+# Per-request timeout for backend proxying
+request_timeout = "10s"
+# Skip TLS verification for backend target (use only for local/self-signed backends)
+skip_backend_tls_verify = false
 
 [restful]
 # Address to bind RESTful API server
@@ -205,7 +241,7 @@ maximum_clients_per_user = 0
 [quic]
 # Congestion control configuration
 [quic.congestion_control]
-# Congestion control algorithm: bbr, cubic, new_reno
+# Congestion control algorithm: bbr, bbr3, cubic, new_reno
 controller = "bbr"
 # Initial congestion window size in bytes
 initial_window = 1048576
@@ -258,6 +294,10 @@ ip_mode = "v4first"
 # Local addresses to bind for direct connections
 bind_ipv4 = "1.2.3.4"
 bind_ipv6 = "0:0:0:0:0:ffff:0102:0304"
+# Multiple bind IPs are also supported; one matching the target address family
+# is selected randomly for each connection.
+# bind_ipv4 = ["1.2.3.4", "1.2.3.5"]
+# bind_ipv6 = ["0:0:0:0:0:ffff:0102:0304", "0:0:0:0:0:ffff:0102:0305"]
 # Network interface to bind for direct connections
 bind_device = "eth1234"
 

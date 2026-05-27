@@ -1,46 +1,54 @@
 name: CI
 
-#--------------------------------------------------
-# Workflow Triggers
-#--------------------------------------------------
 on:
   push:
     tags: ["v*"]
     branches: ["main"]
   pull_request:
     branches: ["main"]
+  workflow_dispatch:
 
-#--------------------------------------------------
-# Concurrency Control
-#--------------------------------------------------
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
-#--------------------------------------------------
-# Jobs
-#--------------------------------------------------
+defaults:
+  run:
+    shell: bash
+
+env:
+  RUST_LOG: "tuic_server=TRACE,tuic_client=TRACE"
+  RUST_TOOLCHAIN: "stable"
+  RUSTC_BOOTSTRAP: "1"
+  SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+
 jobs:
   build:
     name: Build
-    uses: ./.github/workflows/rust-build.yml
+    uses: rust-proxy/workflows/.github/workflows/rust-build.yml@v1.0.35
+    secrets:
+      sentry-dsn: ${{ secrets.SENTRY_DSN }}
     with:
-      rust-toolchain: "nightly-2025-10-05"
+      rust-toolchain: "stable"
       packages: "tuic-server,tuic-client"
       target-config-file: ".github/target.toml"
-      rustflags: "-Zthreads=8"
+      rustflags: ""
+      enable-tmate: false
+      enable-sccache: true
+      only-clippy-tests-on-pr: false
 
   release:
     name: Release
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')))
     needs: [build]
-    uses: ./.github/workflows/release-publish.yml
+    uses: rust-proxy/workflows/.github/workflows/release-publish.yml@v1.0.35
     with:
       cliff-config: '.github/cliff.toml'
 
   docker:
     name: Docker
     needs: [build]
-    uses: ./.github/workflows/docker-publish.yml
+    uses: rust-proxy/workflows/.github/workflows/docker-publish.yml@v1.0.35
     with:
       docker-file: '.github/Dockerfile'
       image-name: 'tuic-server'

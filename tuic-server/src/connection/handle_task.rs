@@ -1,19 +1,19 @@
 use std::{
-	collections::hash_map::Entry,
 	io::{Error as IoError, ErrorKind},
 	net::{IpAddr, SocketAddr},
 };
 
 use bytes::Bytes;
 use eyre::{OptionExt, eyre};
+use rand::prelude::IndexedRandom;
 use tokio::{
 	io::{AsyncReadExt, AsyncWriteExt},
 	net::{self, TcpSocket, TcpStream},
 };
 use tracing::{info, warn};
 use tuic_core::{
-	Address,
-	quinn::{Authenticate, Connect, Packet},
+	Address, is_private_ip,
+	quinn::{Authenticate, Connect, Packet, StreamRx, StreamTx},
 };
 
 use super::{Connection, ERROR_CODE, UdpSession};
@@ -39,7 +39,7 @@ impl Connection {
 		}
 	}
 
-	fn decide_acl_for_addrs(
+	async fn decide_acl_for_addrs(
 		&self,
 		addrs: &[SocketAddr],
 		port: u16,
@@ -110,10 +110,26 @@ impl Connection {
 					AclAddress::Domain(_) | AclAddress::WildcardDomain(_) => {
 						domain_matches(&rule.addr, dom) && ports_proto_ok(rule)
 					}
-					_ => addrs.iter().any(|sa| rule.matching(*sa, port, is_tcp)),
+					_ => {
+						let mut found = false;
+						for sa in addrs {
+							if rule.matching(*sa, port, is_tcp).await {
+								found = true;
+								break;
+							}
+						}
+						found
+					}
 				}
 			} else {
-				addrs.iter().any(|sa| rule.matching(*sa, port, is_tcp))
+				let mut found = false;
+				for sa in addrs {
+					if rule.matching(*sa, port, is_tcp).await {
+						found = true;
+						break;
+					}
+				}
+				found
 			};
 
 			if matched {
@@ -136,10 +152,11 @@ impl Connection {
 	}
 
 	fn get_bind_ip(&self, is_ipv6: bool, outbound: &OutboundRule) -> Option<IpAddr> {
+		let mut rng = rand::rng();
 		if is_ipv6 {
-			outbound.bind_ipv6.map(IpAddr::from)
+			outbound.bind_ipv6.choose(&mut rng).copied().map(IpAddr::from)
 		} else {
-			outbound.bind_ipv4.map(IpAddr::from)
+			outbound.bind_ipv4.choose(&mut rng).copied().map(IpAddr::from)
 		}
 	}
 
@@ -159,24 +176,13 @@ impl Connection {
 	}
 
 	pub async fn handle_authenticate(&self, auth: Authenticate) {
-		info!(
-			"[{id:#010x}] [{addr}] [{user}] [AUTH] {auth_uuid}",
-			id = self.id(),
-			addr = self.inner.remote_address(),
-			user = self.auth,
-			auth_uuid = auth.uuid(),
-		);
+		info!("[AUTH] {}", auth.uuid());
 	}
 
-	pub async fn handle_connect(&self, mut conn: Connect) {
+	pub async fn handle_connect<S: StreamTx, R: StreamRx>(&self, mut conn: Connect<S, R>) {
 		let target_addr = conn.addr().to_string();
 
-		info!(
-			"[{id:#010x}] [{addr}] [{user}] [TCP] {target_addr} ",
-			id = self.id(),
-			addr = self.inner.remote_address(),
-			user = self.auth,
-		);
+		info!("[TCP] {target_addr} ");
 
 		let process = async {
 			// First resolve using default outbound to get candidate IPs
@@ -189,15 +195,10 @@ impl Connection {
 				Address::DomainAddress(d, _) => Some(d.as_str()),
 				_ => None,
 			};
-			let (outbound_name, hijack, drop) = self.decide_acl_for_addrs(&initial_addrs, port, true, domain);
+			let (outbound_name, hijack, drop) = self.decide_acl_for_addrs(&initial_addrs, port, true, domain).await;
 
 			if drop {
-				warn!(
-					"[{id:#010x}] [{addr}] [{user}] [TCP] {target_addr} blocked by ACL",
-					id = self.id(),
-					addr = self.inner.remote_address(),
-					user = self.auth,
-				);
+				warn!("[TCP] {target_addr} blocked by ACL");
 				_ = conn.reset(ERROR_CODE);
 				return Ok(());
 			}
@@ -222,11 +223,11 @@ impl Connection {
 			if err.is_some() {
 				_ = conn.reset(ERROR_CODE);
 			} else {
-				_ = conn.finish();
+				_ = conn.finish().await;
 			}
 			_ = stream.shutdown().await;
 
-			let uuid = self.auth.get().ok_or_eyre("Unexpected autherization state")?;
+			let uuid = self.auth.get().ok_or_eyre("Unexpected authorization state")?;
 			restful::traffic_tx(&self.ctx, &uuid, tx);
 			restful::traffic_rx(&self.ctx, &uuid, rx);
 			if let Some(err) = err {
@@ -237,12 +238,7 @@ impl Connection {
 
 		match process.await {
 			Ok(()) => {}
-			Err(err) => warn!(
-				"[{id:#010x}] [{addr}] [{user}] [TCP] {target_addr}: {err}",
-				id = self.id(),
-				addr = self.inner.remote_address(),
-				user = self.auth,
-			),
+			Err(err) => warn!("[TCP] {target_addr}: {err}"),
 		}
 	}
 
@@ -301,19 +297,15 @@ impl Connection {
 			.unwrap_or_else(|| eyre!("Failed to connect to any address")))
 	}
 
-	pub async fn handle_packet(&self, pkt: Packet, mode: UdpRelayMode) {
+	pub async fn handle_packet<R: StreamRx>(&self, pkt: Packet<R>, mode: UdpRelayMode) {
 		let assoc_id = pkt.assoc_id();
 		let pkt_id = pkt.pkt_id();
 		let frag_id = pkt.frag_id();
 		let frag_total = pkt.frag_total();
 
 		info!(
-			"[{id:#010x}] [{addr}] [{user}] [UDP-OUT] [{assoc_id:#06x}] [from-{mode}] [{pkt_id:#06x}] fragment \
-			 {frag_id}/{frag_total}",
-			id = self.id(),
-			addr = self.inner.remote_address(),
-			user = self.auth,
-			frag_id = frag_id + 1,
+			"[UDP-OUT] [{assoc_id:#06x}] [from-{mode}] [{pkt_id:#06x}] fragment {frag_id}/{frag_total}",
+			frag_id = frag_id + 1
 		);
 
 		self.udp_relay_mode.store(Some(mode).into());
@@ -323,11 +315,7 @@ impl Connection {
 			Ok(Some(res)) => res,
 			Err(err) => {
 				warn!(
-					"[{id:#010x}] [{addr}] [{user}] [UDP-OUT] [{assoc_id:#06x}] [from-{mode}] [{pkt_id:#06x}] fragment \
-					 {frag_id}/{frag_total}: {err}",
-					id = self.id(),
-					addr = self.inner.remote_address(),
-					user = self.auth,
+					"[UDP-OUT] [{assoc_id:#06x}] [from-{mode}] [{pkt_id:#06x}] fragment {frag_id}/{frag_total}: {err}",
 					frag_id = frag_id + 1,
 				);
 				return;
@@ -336,26 +324,17 @@ impl Connection {
 
 		let process = async {
 			info!(
-				"[{id:#010x}] [{addr}] [{user}] [UDP-OUT] [{assoc_id:#06x}] [from-{mode}] [{pkt_id:#06x}] to {src_addr}",
-				id = self.id(),
-				addr = self.inner.remote_address(),
-				user = self.auth,
-				src_addr = addr,
+				"[UDP-OUT] [{assoc_id:#06x}] [from-{mode}] [{pkt_id:#06x}] to {src_addr}",
+				src_addr = addr
 			);
 
-			let guard = self.udp_sessions.read().await;
-			let session = guard.get(&assoc_id).map(|v| v.to_owned());
-			drop(guard);
-			let session = match session {
-				Some(v) => v,
-				None => match self.udp_sessions.write().await.entry(assoc_id) {
-					Entry::Occupied(entry) => entry.get().clone(),
-					Entry::Vacant(entry) => {
-						let session = UdpSession::new(self.ctx.clone(), self.clone(), assoc_id)?;
-						entry.insert(session.clone());
-						session
-					}
-				},
+			let session = match self.udp_sessions.get(&assoc_id).await {
+				Some(s) => s,
+				None => {
+					let session = UdpSession::new(self.ctx.clone(), self.clone(), assoc_id, self.udp_sessions.clone())?;
+					self.udp_sessions.insert(assoc_id, session.clone()).await;
+					session
+				}
 			};
 
 			// Resolve using default outbound and apply ACL
@@ -368,16 +347,13 @@ impl Connection {
 				Address::DomainAddress(d, _) => Some(d.as_str()),
 				_ => None,
 			};
-			let (outbound_name, hijack, should_drop) = self.decide_acl_for_addrs(&initial_addrs, addr.port(), false, domain);
+			let (outbound_name, hijack, should_drop) =
+				self.decide_acl_for_addrs(&initial_addrs, addr.port(), false, domain).await;
 			if should_drop {
 				// Silently drop the packet as per ACL
 				warn!(
-					"[{id:#010x}] [{addr}] [{user}] [UDP-OUT] [{assoc_id:#06x}] [from-{mode}] [{pkt_id:#06x}] to {src_addr} \
-					 blocked by ACL",
-					id = self.id(),
-					addr = self.inner.remote_address(),
-					user = self.auth,
-					src_addr = addr,
+					"[UDP-OUT] [{assoc_id:#06x}] [from-{mode}] [{pkt_id:#06x}] to {src_addr} blocked by ACL",
+					src_addr = addr
 				);
 				return Ok(());
 			}
@@ -390,34 +366,21 @@ impl Connection {
 				let allow_udp = outbound.allow_udp.unwrap_or(false);
 				if !allow_udp {
 					warn!(
-						"[{id:#010x}] [{addr}] [{user}] [UDP-OUT-SOCKS5] [{assoc_id:#06x}] [from-{mode}] [{pkt_id:#06x}] to \
-						 {src_addr} blocked by ACL",
-						id = self.id(),
-						addr = self.inner.remote_address(),
-						user = self.auth,
-						src_addr = addr,
+						"[UDP-OUT-SOCKS5] [{assoc_id:#06x}] [from-{mode}] [{pkt_id:#06x}] to {src_addr} blocked by ACL",
+						src_addr = addr
 					);
 					// Silently drop UDP to avoid leaking QUIC/HTTP3 when SOCKS5 is requested
 					return Ok(());
 				} else {
 					// We don't support UDP via SOCKS5 yet; fall back to direct
 					info!(
-						"[{id:#010x}] [{addr}] [{user}] [UDP-OUT] [{assoc_id:#06x}] outbound '{outbound_name}' allows UDP but \
-						 UDP via SOCKS5 not supported; using direct as you configured",
-						id = self.id(),
-						addr = self.inner.remote_address(),
-						user = self.auth,
+						"[UDP-OUT] [{assoc_id:#06x}] outbound '{outbound_name}' allows UDP but UDP via SOCKS5 not supported; \
+						 using direct as you configured"
 					);
 				}
 			} else if !outbound.kind.eq_ignore_ascii_case("direct") {
 				// Outbound other than direct is not supported for UDP yet; proceed as direct
-				warn!(
-					"[{id:#010x}] [{addr}] [{user}] [UDP-OUT] [{assoc_id:#06x}] outbound '{outbound_name}' not supported; \
-					 using direct",
-					id = self.id(),
-					addr = self.inner.remote_address(),
-					user = self.auth,
-				);
+				warn!("[UDP-OUT] [{assoc_id:#06x}] outbound '{outbound_name}' not supported; using direct");
 			}
 
 			let socket_addr = if let Some(h) = hijack {
@@ -427,60 +390,38 @@ impl Connection {
 				initial_addrs[0]
 			};
 
-			let uuid = self.auth.get().ok_or_eyre("Unexpected autherization state")?;
+			let uuid = self.auth.get().ok_or_eyre("Unexpected authorization state")?;
 			restful::traffic_tx(&self.ctx, &uuid, pkt.len());
-			if let Some(session) = session.upgrade() {
-				session.send(pkt, socket_addr).await
-			} else {
-				Err(eyre!("UdpSession dropped already").into())
-			}
+			session.send(pkt, socket_addr).await
 		};
 
 		if let Err(err) = process.await {
 			warn!(
-				"[{id:#010x}] [{addr}] [{user}] [UDP-OUT] [{assoc_id:#06x}] [from-{mode}] [{pkt_id:#06x}] to {src_addr}: {err}",
-				id = self.id(),
-				addr = self.inner.remote_address(),
-				user = self.auth,
-				src_addr = addr,
+				"[UDP-OUT] [{assoc_id:#06x}] [from-{mode}] [{pkt_id:#06x}] to {src_addr}: {err}",
+				src_addr = addr
 			);
 		}
 	}
 
 	pub async fn handle_dissociate(&self, assoc_id: u16) {
-		info!(
-			"[{id:#010x}] [{addr}] [{user}] [UDP-DROP] [{assoc_id:#06x}]",
-			id = self.id(),
-			addr = self.inner.remote_address(),
-			user = self.auth,
-		);
+		info!("[UDP-DROP] [{assoc_id:#06x}]");
 
-		if let Some(session) = self.udp_sessions.write().await.remove(&assoc_id)
-			&& let Some(session) = session.upgrade()
-		{
+		if let Some(session) = self.udp_sessions.remove(&assoc_id).await {
 			session.close().await;
 		}
 	}
 
 	pub async fn handle_heartbeat(&self) {
-		info!(
-			"[{id:#010x}] [{addr}] [{user}] [HB]",
-			id = self.id(),
-			addr = self.inner.remote_address(),
-			user = self.auth,
-		);
+		info!("[HB]");
 	}
 
 	pub async fn relay_packet(self, pkt: Bytes, addr: Address, assoc_id: u16) -> eyre::Result<()> {
 		let addr_display = addr.to_string();
 
 		info!(
-			"[{id:#010x}] [{addr}] [{user}] [UDP-IN] [{assoc_id:#06x}] [to-{mode}] from {src_addr}",
-			id = self.id(),
-			addr = self.inner.remote_address(),
-			user = self.auth,
+			"[UDP-IN] [{assoc_id:#06x}] [to-{mode}] from {src_addr}",
 			mode = self.udp_relay_mode.load().unwrap(),
-			src_addr = addr_display,
+			src_addr = addr_display
 		);
 
 		restful::traffic_rx(&self.ctx, &self.auth.get().ok_or_eyre("Unreachable")?, pkt.len());
@@ -492,12 +433,9 @@ impl Connection {
 
 		if let Err(err) = res {
 			warn!(
-				"[{id:#010x}] [{addr}] [{user}] [UDP-IN] [{assoc_id:#06x}] [to-{mode}] from {src_addr}: {err}",
-				id = self.id(),
-				addr = self.inner.remote_address(),
-				user = self.auth,
+				"[UDP-IN] [{assoc_id:#06x}] [to-{mode}] from {src_addr}: {err}",
 				mode = self.udp_relay_mode.load().unwrap(),
-				src_addr = addr_display,
+				src_addr = addr_display
 			);
 		}
 		Ok(())
@@ -647,26 +585,5 @@ impl Connection {
 		}
 
 		Ok(stream)
-	}
-}
-
-fn is_private_ip(ip: &IpAddr) -> bool {
-	match ip {
-		IpAddr::V4(ipv4) => {
-			// 10.0.0.0/8
-			ipv4.octets()[0] == 10
-				// 172.16.0.0/12
-				|| (ipv4.octets()[0] == 172 && (ipv4.octets()[1] >= 16 && ipv4.octets()[1] <= 31))
-				// 192.168.0.0/16
-				|| (ipv4.octets()[0] == 192 && ipv4.octets()[1] == 168)
-				// 169.254.0.0/16 (Link-local)
-				|| (ipv4.octets()[0] == 169 && ipv4.octets()[1] == 254)
-		}
-		IpAddr::V6(ipv6) => {
-			// fc00::/7 (Unique Local Address)
-			ipv6.octets()[0] & 0xfe == 0xfc
-				// fe80::/10 (Link-local)
-				|| (ipv6.octets()[0] == 0xfe && (ipv6.octets()[1] & 0xc0) == 0x80)
-		}
 	}
 }

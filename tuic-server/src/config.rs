@@ -12,7 +12,9 @@ use figment::{
 	providers::{Format, Serialized, Toml, Yaml},
 };
 use figment_json5::Json5;
-use serde::{Deserialize, Serialize};
+use rand::{RngExt, distr::Alphanumeric, rng};
+use reqwest::Url;
+use serde::{Deserialize, Deserializer, Serialize};
 use tracing::{level_filters::LevelFilter, warn};
 use uuid::Uuid;
 
@@ -77,14 +79,20 @@ pub struct Cli {
 #[educe(Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-	pub log_level: LogLevel,
+	pub log_level:  LogLevel,
 	#[educe(Default(expression = "[::]:8443".parse().unwrap()))]
-	pub server:    SocketAddr,
-	pub users:     HashMap<Uuid, String>,
-	pub tls:       TlsConfig,
+	pub server:     SocketAddr,
+	pub users:      HashMap<Uuid, String>,
+	pub tls:        TlsConfig,
+	#[educe(Default = None)]
+	pub camouflage: Option<CamouflageConfig>,
 
 	#[educe(Default = "")]
 	pub data_dir: PathBuf,
+
+	/// Logging configuration.
+	#[serde(default)]
+	pub log: LogConfig,
 
 	#[educe(Default = None)]
 	pub restful: Option<RestfulConfig>,
@@ -96,6 +104,9 @@ pub struct Config {
 
 	#[educe(Default = false)]
 	pub zero_rtt_handshake: bool,
+
+	#[educe(Default(expression = TokioRuntime::Auto))]
+	pub tokio_runtime: TokioRuntime,
 
 	#[educe(Default = true)]
 	pub dual_stack: bool,
@@ -149,6 +160,9 @@ pub struct Config {
 	#[serde(default, rename = "hostname")]
 	#[deprecated]
 	pub __hostname:           Option<String>,
+	#[serde(default, rename = "acme_email")]
+	#[deprecated]
+	pub __acme_email:         Option<String>,
 	#[serde(default, rename = "congestion_control")]
 	#[deprecated]
 	pub __congestion_control: Option<CongestionController>,
@@ -199,6 +213,8 @@ pub struct TlsConfig {
 	pub hostname:    String,
 	#[educe(Default(expression = false))]
 	pub auto_ssl:    bool,
+	#[educe(Default(expression = ""))]
+	pub acme_email:  String,
 }
 
 #[derive(Deserialize, Serialize, Educe)]
@@ -228,6 +244,23 @@ pub struct QuicConfig {
 	#[serde(with = "humantime_serde")]
 	#[educe(Default(expression = Duration::from_secs(30)))]
 	pub max_idle_time: Duration,
+}
+
+#[derive(Deserialize, Serialize, Educe, Clone, Debug)]
+#[educe(Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct CamouflageConfig {
+	#[educe(Default = false)]
+	pub enabled:                 bool,
+	#[educe(Default(expression = "".to_string()))]
+	pub reverse_proxy_url:       String,
+	#[educe(Default = None)]
+	pub reverse_proxy_hostname:  Option<String>,
+	#[serde(with = "humantime_serde")]
+	#[educe(Default(expression = Duration::from_secs(10)))]
+	pub request_timeout:         Duration,
+	#[educe(Default = false)]
+	pub skip_backend_tls_verify: bool,
 }
 
 /// The `default` rule is mandatory when named rules are present; other named
@@ -261,13 +294,13 @@ pub struct OutboundRule {
 
 	/// Optional IPv4 address to bind to for direct connections (only used when
 	/// kind == "direct").
-	#[serde(default)]
-	pub bind_ipv4: Option<Ipv4Addr>,
+	#[serde(default, deserialize_with = "deserialize_single_or_vec")]
+	pub bind_ipv4: Vec<Ipv4Addr>,
 
 	/// Optional IPv6 address to bind to for direct connections (only used when
 	/// kind == "direct").
-	#[serde(default)]
-	pub bind_ipv6: Option<Ipv6Addr>,
+	#[serde(default, deserialize_with = "deserialize_single_or_vec")]
+	pub bind_ipv6: Vec<Ipv6Addr>,
 
 	/// Optional device/interface name to bind to (only used when kind ==
 	/// "direct").
@@ -326,6 +359,31 @@ pub struct ExperimentalConfig {
 	pub drop_private:  bool,
 }
 
+fn deserialize_single_or_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+	D: Deserializer<'de>,
+	T: Deserialize<'de>,
+{
+	#[derive(Deserialize)]
+	#[serde(untagged)]
+	enum SingleOrVec<T> {
+		Single(T),
+		Vec(Vec<T>),
+	}
+
+	match SingleOrVec::deserialize(deserializer)? {
+		SingleOrVec::Single(value) => Ok(vec![value]),
+		SingleOrVec::Vec(values) => Ok(values),
+	}
+}
+
+fn generate_random_alphanumeric_string(min: usize, max: usize) -> String {
+	let mut rng = rng();
+	let len = rng.random_range(min..=max);
+
+	rng.sample_iter(&Alphanumeric).take(len).map(char::from).collect()
+}
+
 impl Config {
 	pub fn migrate(&mut self) {
 		// Migrate TLS-related fields
@@ -345,6 +403,9 @@ impl Config {
 			}
 			if let Some(hostname) = self.__hostname.take() {
 				self.tls.hostname = hostname;
+			}
+			if let Some(acme_email) = self.__acme_email.take() {
+				self.tls.acme_email = acme_email;
 			}
 			if let Some(alpn) = self.__alpn.take() {
 				self.tls.alpn = alpn;
@@ -401,10 +462,15 @@ impl Config {
 		Self {
 			users: {
 				let mut users = HashMap::new();
-				users.insert(Uuid::new_v4(), "YOUR_USER_PASSWD_HERE".into());
+				for _ in 0..5 {
+					users.insert(Uuid::new_v4(), generate_random_alphanumeric_string(30, 50));
+				}
 				users
 			},
-			restful: Some(RestfulConfig::default()),
+			restful: Some(RestfulConfig {
+				secret: generate_random_alphanumeric_string(30, 50),
+				..Default::default()
+			}),
 			// Provide a minimal outbound example
 			outbound: OutboundConfig {
 				default: OutboundRule {
@@ -434,6 +500,76 @@ pub enum LogLevel {
 	Error,
 	Off,
 }
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormat {
+	#[default]
+	Text,
+	Json,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LogRotation {
+	#[default]
+	Never,
+	Hourly,
+	Daily,
+}
+
+/// Logging settings.
+#[derive(Debug, Clone, Deserialize, Serialize, Educe)]
+#[serde(deny_unknown_fields)]
+#[educe(Default)]
+pub struct LogConfig {
+	/// Log output format for stdout and log_file.
+	pub format: LogFormat,
+
+	/// Use compact log format (single-line, less verbose). Only applies to
+	/// `text` format.
+	#[educe(Default = true)]
+	pub compact: bool,
+
+	/// Optional log file path. When set, logs are also written to this file
+	/// with the configured `log_rotation` policy.
+	pub log_file: Option<PathBuf>,
+
+	/// Rotation policy for `log_file`.
+	pub log_rotation: LogRotation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TokioRuntime {
+	#[default]
+	Auto,
+	MultiThread,
+	CurrentThread,
+}
+
+impl TokioRuntime {
+	pub fn resolve(self) -> ResolvedRuntime {
+		match self {
+			TokioRuntime::MultiThread => ResolvedRuntime::MultiThread,
+			TokioRuntime::CurrentThread => ResolvedRuntime::CurrentThread,
+			TokioRuntime::Auto => {
+				if num_cpus::get() <= 2 {
+					ResolvedRuntime::CurrentThread
+				} else {
+					ResolvedRuntime::MultiThread
+				}
+			}
+		}
+	}
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ResolvedRuntime {
+	MultiThread,
+	CurrentThread,
+}
+
 impl From<LogLevel> for LevelFilter {
 	fn from(value: LogLevel) -> Self {
 		match value {
@@ -557,9 +693,18 @@ pub async fn parse_config(cli: Cli, env_state: EnvState) -> eyre::Result<Config>
 	// Handle --init flag
 	if cli.init {
 		warn!("Generating an example configuration to config.toml......");
+
 		let example = Config::full_example();
 		let example = toml::to_string_pretty(&example).unwrap();
-		tokio::fs::write("config.toml", example).await?;
+
+		let default_path = std::path::Path::new("config.toml");
+		if tokio::fs::try_exists(default_path).await? {
+			return Err(eyre::eyre!(
+				"config.toml already exists in the current directory, aborting to avoid overwriting."
+			));
+		}
+
+		tokio::fs::write(default_path, example).await?;
 		return Err(Control("Done").into());
 	}
 
@@ -680,6 +825,40 @@ pub async fn parse_config(cli: Cli, env_state: EnvState) -> eyre::Result<Config>
 		config.tls.private_key.clone()
 	};
 
+	if let Some(camouflage) = &config.camouflage
+		&& camouflage.enabled
+	{
+		if camouflage.reverse_proxy_url.trim().is_empty() {
+			return Err(eyre::eyre!(
+				"`camouflage.reverse_proxy_url` is required when camouflage is enabled"
+			));
+		}
+		if !camouflage.reverse_proxy_url.starts_with("http://") && !camouflage.reverse_proxy_url.starts_with("https://") {
+			return Err(eyre::eyre!(
+				"`camouflage.reverse_proxy_url` must be an absolute URL and start with http:// or https://"
+			));
+		}
+		if camouflage
+			.reverse_proxy_hostname
+			.as_deref()
+			.is_some_and(|s| s.trim().is_empty())
+		{
+			return Err(eyre::eyre!("`camouflage.reverse_proxy_hostname` cannot be empty"));
+		}
+		let backend = Url::parse(camouflage.reverse_proxy_url.as_str())
+			.map_err(|err| eyre::eyre!("`camouflage.reverse_proxy_url` is invalid: {err}"))?;
+		if backend
+			.host_str()
+			.and_then(|host| host.parse::<std::net::IpAddr>().ok())
+			.is_some()
+			&& camouflage.reverse_proxy_hostname.is_none()
+		{
+			return Err(eyre::eyre!(
+				"`camouflage.reverse_proxy_hostname` is required when `camouflage.reverse_proxy_url` uses an IP address"
+			));
+		}
+	}
+
 	Ok(config)
 }
 
@@ -732,6 +911,14 @@ mod tests {
 		assert!(result.tls.self_sign);
 		assert!(result.tls.auto_ssl);
 		assert_eq!(result.tls.hostname, "testhost");
+		assert_eq!(result.tls.acme_email, "admin@example.com");
+		assert!(result.camouflage.is_some());
+		let camouflage = result.camouflage.as_ref().unwrap();
+		assert!(camouflage.enabled);
+		assert_eq!(camouflage.reverse_proxy_url, "https://127.0.0.1:443");
+		assert_eq!(camouflage.reverse_proxy_hostname.as_deref(), Some("example.com"));
+		assert_eq!(camouflage.request_timeout, Duration::from_secs(15));
+		assert!(camouflage.skip_backend_tls_verify);
 		assert_eq!(result.quic.initial_mtu, 1400);
 		assert_eq!(result.quic.min_mtu, 1300);
 		assert_eq!(result.quic.send_window, 10000000);
@@ -767,7 +954,6 @@ mod tests {
 
 		let uuid = Uuid::parse_str("123e4567-e89b-12d3-a456-426614174002").unwrap();
 		assert_eq!(result.users.get(&uuid), Some(&"old_password".to_string()));
-
 
 		assert!(!result.tls.self_sign);
 		assert!(result.data_dir.ends_with("__test__legacy_data")); // Cleanup test directories
@@ -850,6 +1036,44 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn test_camouflage_invalid_reverse_proxy_url() {
+		let config = r#"
+server = "127.0.0.1:8080"
+
+[tls]
+self_sign = true
+
+[users]
+"123e4567-e89b-12d3-a456-426614174000" = "password1"
+
+[camouflage]
+enabled = true
+reverse_proxy_url = "127.0.0.1:443"
+"#;
+		let result = test_parse_config(config, ".toml").await;
+		assert!(result.is_err());
+	}
+
+	#[tokio::test]
+	async fn test_camouflage_ip_reverse_proxy_url_requires_reverse_proxy_hostname() {
+		let config = r#"
+server = "127.0.0.1:8080"
+
+[tls]
+self_sign = true
+
+[users]
+"123e4567-e89b-12d3-a456-426614174000" = "password1"
+
+[camouflage]
+enabled = true
+reverse_proxy_url = "https://127.0.0.1:443"
+"#;
+		let result = test_parse_config(config, ".toml").await;
+		assert!(result.is_err());
+	}
+
+	#[tokio::test]
 	async fn test_outbound_no_configuration() {
 		// Test that when no outbound configuration is provided, default is used
 		let config = include_str!("../tests/config/outbound_no_configuration.toml");
@@ -876,7 +1100,7 @@ mod tests {
 		let prefer_v4 = result.outbound.named.get("prefer_v4").unwrap();
 		assert_eq!(prefer_v4.kind, "direct");
 		assert_eq!(prefer_v4.ip_mode, Some(StackPrefer::V4first));
-		assert_eq!(prefer_v4.bind_ipv4, Some("2.4.6.8".parse().unwrap()));
+		assert_eq!(prefer_v4.bind_ipv4, vec!["2.4.6.8".parse::<Ipv4Addr>().unwrap()]);
 		assert_eq!(prefer_v4.bind_device, Some("eth233".to_string()));
 
 		let socks5 = result.outbound.named.get("through_socks5").unwrap();
@@ -884,6 +1108,26 @@ mod tests {
 		assert_eq!(socks5.addr, Some("127.0.0.1:1080".to_string()));
 		assert_eq!(socks5.username, Some("optional".to_string()));
 		assert_eq!(socks5.password, Some("optional".to_string()));
+	}
+
+	#[tokio::test]
+	async fn test_outbound_valid_with_multiple_bind_ips() {
+		let config = include_str!("../tests/config/outbound_valid_with_multiple_bind_ips.toml");
+
+		let result = test_parse_config(config, ".toml").await.unwrap();
+
+		let prefer_v4 = result.outbound.named.get("prefer_v4").unwrap();
+		assert_eq!(
+			prefer_v4.bind_ipv4,
+			vec!["2.4.6.8".parse::<Ipv4Addr>().unwrap(), "2.4.6.9".parse::<Ipv4Addr>().unwrap()]
+		);
+		assert_eq!(
+			prefer_v4.bind_ipv6,
+			vec![
+				"0:0:0:0:0:ffff:0204:0608".parse::<Ipv6Addr>().unwrap(),
+				"0:0:0:0:0:ffff:0204:0609".parse::<Ipv6Addr>().unwrap()
+			]
+		);
 	}
 
 	#[tokio::test]

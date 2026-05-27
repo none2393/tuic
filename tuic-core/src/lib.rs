@@ -1,4 +1,4 @@
-#![doc = include_str!("../README.md")]
+pub extern crate quinn as quinn_crate;
 
 mod protocol;
 
@@ -20,8 +20,11 @@ pub mod model;
 mod tests;
 
 // Quinn integration module
-pub mod quinn;
+mod quinn_impl;
+pub mod quinn {
+	pub use super::quinn_impl::*;
+}
 
 // Utility types
 mod utils;
-pub use self::utils::{CongestionControl, StackPrefer, UdpRelayMode};
+pub use self::utils::{CongestionControl, StackPrefer, UdpRelayMode, is_private_ip, sniff_from_stream};
