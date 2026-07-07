@@ -18,7 +18,6 @@ use tokio::{sync::RwLock as AsyncRwLock, time};
 use tracing::{debug, info, warn};
 use tuic_core::quinn::{
 	ClientConfig, Endpoint as QuinnEndpoint, EndpointConfig, QuinnConnection, TokioRuntime, TransportConfig, VarInt,
-	ZeroRttAccepted,
 	bbr::BbrConfig,
 	congestion::{Bbr3Config, CubicConfig, NewRenoConfig},
 	crypto::rustls::QuicClientConfig,
@@ -297,7 +296,6 @@ impl Connection {
 	#[allow(clippy::too_many_arguments)]
 	fn new(
 		conn: QuinnConnection,
-		zero_rtt_accepted: Option<ZeroRttAccepted>,
 		udp_relay_mode: UdpRelayMode,
 		uuid: Uuid,
 		password: Arc<[u8]>,
@@ -321,7 +319,7 @@ impl Connection {
 			fwd_udp_sessions,
 		};
 
-		tokio::spawn(conn.clone().init(zero_rtt_accepted, heartbeat, gc_interval, gc_lifetime));
+		tokio::spawn(conn.clone().init(heartbeat, gc_interval, gc_lifetime));
 
 		conn
 	}
@@ -330,14 +328,13 @@ impl Connection {
 	/// collection
 	async fn init(
 		self,
-		zero_rtt_accepted: Option<ZeroRttAccepted>,
 		heartbeat: Duration,
 		gc_interval: Duration,
 		gc_lifetime: Duration,
 	) {
 		info!("[relay] connection established");
 
-		tokio::spawn(self.clone().authenticate(zero_rtt_accepted));
+		tokio::spawn(self.clone().authenticate());
 		tokio::spawn(self.clone().heartbeat(heartbeat));
 		tokio::spawn(self.clone().collect_garbage(gc_interval, gc_lifetime));
 
@@ -438,22 +435,21 @@ impl Endpoint {
 
 		let connect_to = async {
 			let conn = self.ep.connect(server_addr, self.server.server_name())?;
-			let (conn, zero_rtt_accepted) = if self.zero_rtt_handshake {
+			let conn = if self.zero_rtt_handshake {
 				match conn.into_0rtt() {
-					Ok((conn, zero_rtt_accepted)) => (conn, Some(zero_rtt_accepted)),
-					Err(conn) => (conn.await?, None),
+					Ok(conn) => conn,
+					Err(conn) => conn.await?,
 				}
 			} else {
-				(conn.await?, None)
+				conn.await?
 			};
 
-			Ok((conn, zero_rtt_accepted))
+			Ok(conn)
 		};
 
 		match connect_to.await {
-			Ok((conn, zero_rtt_accepted)) => Ok(Connection::new(
+			Ok(conn) => Ok(Connection::new(
 				conn,
-				zero_rtt_accepted,
 				self.udp_relay_mode,
 				self.uuid,
 				self.password.clone(),
