@@ -558,6 +558,9 @@ mod tests {
 
 		// Install default crypto provider.\.cross\_ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
+		let _ = rustls::crypto::aws_lc_rs::default_provider()
+        .install_default();
+
 		// Generate self-signed certificate for test domain
 		let cert_params = CertificateParams::new(vec![test_hostname.to_string()]).unwrap();
 		let key_pair = rcgen::KeyPair::generate().unwrap();
