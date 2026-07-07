@@ -26,7 +26,7 @@ use crate::utils::{CongestionControl, StackPrefer, UdpRelayMode};
 /// Environment state for configuration parsing
 #[derive(Debug, Clone, Default)]
 pub struct EnvState {
-	pub tuic_force_toml:    bool,
+	pub tuic_force_toml: bool,
 	pub tuic_config_format: Option<String>,
 }
 
@@ -34,7 +34,7 @@ impl EnvState {
 	/// Create EnvState from system environment variables
 	pub fn from_system() -> Self {
 		Self {
-			tuic_force_toml:    std::env::var("TUIC_FORCE_TOML").is_ok(),
+			tuic_force_toml: std::env::var("TUIC_FORCE_TOML").is_ok(),
 			tuic_config_format: std::env::var("TUIC_CONFIG_FORMAT").ok().map(|v| v.to_lowercase()),
 		}
 	}
@@ -190,6 +190,9 @@ pub struct Relay {
 	#[serde(with = "humantime_serde")]
 	pub gc_lifetime: Duration,
 
+	#[educe(Default(expression = 1280u32))]
+	pub max_concurrent_streams: u32,
+
 	#[educe(Default = false)]
 	pub skip_cert_verify: bool,
 
@@ -228,8 +231,8 @@ pub struct ProxyConfig {
 #[educe(Default)]
 #[serde(deny_unknown_fields, default)]
 pub struct Local {
-	#[educe(Default(expression = "127.0.0.1:1080".parse().unwrap()))]
-	pub server: SocketAddr,
+	#[educe(Default = None)]
+	pub server: Option<SocketAddr>,
 
 	#[educe(Default = None)]
 	#[serde(deserialize_with = "deserialize_optional_bytes")]
@@ -244,6 +247,10 @@ pub struct Local {
 
 	#[educe(Default = 1500)]
 	pub max_packet_size: usize,
+
+	#[educe(Default(expression = Duration::from_secs(300)))]
+	#[serde(with = "humantime_serde")]
+	pub socks5_udp_idle_timeout: Duration,
 
 	#[educe(Default(expression = Vec::new()))]
 	pub tcp_forward: Vec<TcpForward>,
@@ -263,9 +270,9 @@ pub struct TcpForward {
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct UdpForward {
-	pub listen:  SocketAddr,
+	pub listen: SocketAddr,
 	#[serde(deserialize_with = "deserialize_server")]
-	pub remote:  (String, u16),
+	pub remote: (String, u16),
 	#[serde(default = "default_udp_timeout", deserialize_with = "deserialize_duration")]
 	pub timeout: Duration,
 }
@@ -281,7 +288,7 @@ impl Config {
 
 		// Check if config file exists
 		if !path.exists() {
-			return Err(ConfigError::ConfigNotFound(path))?;
+			Err(ConfigError::ConfigNotFound(path.clone()))?;
 		}
 
 		let figmet = Figment::from(Serialized::defaults(Config::default()));
@@ -624,6 +631,7 @@ mod tests {
 		assert_eq!(config.relay.gc_lifetime, Duration::from_secs(15));
 		assert!(!config.relay.skip_cert_verify);
 		assert_eq!(config.local.max_packet_size, 1500);
+		assert_eq!(config.local.server, Some("127.0.0.1:1080".parse().unwrap()));
 	}
 
 	#[test]
@@ -797,8 +805,8 @@ server = "127.0.0.1:1081"
 		let json5_config = include_str!("../tests/config/ipv6_server_address.json5");
 
 		let config = test_parse_config(json5_config, ".json5").unwrap();
-		assert!(config.local.server.is_ipv6());
-		assert_eq!(config.local.server.to_string(), "[::1]:1080");
+		assert!(config.local.server.as_ref().unwrap().is_ipv6());
+		assert_eq!(config.local.server.unwrap().to_string(), "[::1]:1080");
 	}
 
 	#[test]
@@ -821,7 +829,7 @@ server = "127.0.0.1:1081"
 		assert_eq!(config.log_level, "info");
 		assert_eq!(config.relay.server.0, "example.com");
 		assert_eq!(config.relay.server.1, 443);
-		assert_eq!(config.local.server.to_string(), "127.0.0.1:1080");
+		assert_eq!(config.local.server, Some("127.0.0.1:1080".parse().unwrap()));
 	}
 
 	#[test]
@@ -871,7 +879,7 @@ server = "127.0.0.1:1081"
 		assert!(!config.relay.pmtu);
 		assert_eq!(config.relay.gc_interval, Duration::from_secs(5));
 		assert_eq!(config.relay.gc_lifetime, Duration::from_secs(20));
-		assert_eq!(config.local.server.to_string(), "[::1]:1080");
+		assert_eq!(config.local.server, Some("[::1]:1080".parse().unwrap()));
 		assert_eq!(config.local.dual_stack, Some(false));
 		assert_eq!(config.local.max_packet_size, 2000);
 	}
@@ -958,7 +966,7 @@ server = "127.0.0.1:1081"
 
 		// Create EnvState with force_toml enabled
 		let env_state = EnvState {
-			tuic_force_toml:    true,
+			tuic_force_toml: true,
 			tuic_config_format: None,
 		};
 
@@ -973,7 +981,7 @@ server = "127.0.0.1:1081"
 
 		// Create EnvState with config_format set to YAML
 		let env_state = EnvState {
-			tuic_force_toml:    false,
+			tuic_force_toml: false,
 			tuic_config_format: Some("yaml".to_string()),
 		};
 
@@ -1050,11 +1058,40 @@ server = "127.0.0.1:1081"
 		assert_eq!(config.relay.gc_lifetime, Duration::from_secs(60));
 		assert!(config.relay.skip_cert_verify);
 
-		assert_eq!(config.local.server.to_string(), "[::1]:9999");
+		assert_eq!(config.local.server.unwrap().to_string(), "[::1]:9999");
 		assert_eq!(config.local.username, Some(b"user123".to_vec()));
 		assert_eq!(config.local.password, Some(b"pass456".to_vec()));
 		assert_eq!(config.local.dual_stack, Some(true));
 		assert_eq!(config.local.max_packet_size, 2000);
+	}
+
+	#[test]
+	fn test_no_local_server() {
+		let toml_config = r#"
+		[relay]
+		server = "example.com:443"
+		uuid = "00000000-0000-0000-0000-000000000000"
+		password = "test"
+
+		[local]
+		tcp_forward = []
+		"#;
+
+		let config = test_parse_config(toml_config, ".toml").unwrap();
+		assert_eq!(config.local.server, None);
+	}
+
+	#[test]
+	fn test_no_local_section() {
+		let toml_config = r#"
+		[relay]
+		server = "example.com:443"
+		uuid = "00000000-0000-0000-0000-000000000000"
+		password = "test"
+		"#;
+
+		let config = test_parse_config(toml_config, ".toml").unwrap();
+		assert_eq!(config.local.server, None);
 	}
 
 	#[test]

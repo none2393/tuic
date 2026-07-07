@@ -15,9 +15,13 @@ repository.workspace = true
 default = ["aws-lc-rs"]
 aws-lc-rs = ["tuic-core/aws-lc-rs", "dep:aws-lc-rs", "rustls/aws-lc-rs"]
 jemallocator = ["tikv-jemallocator"]
+# Heap profiling / resource-leak detection via dhat. Replaces the global
+# allocator (mutually exclusive with `jemallocator`, dhat wins) and pulls in
+# tokio's signal support so Ctrl-C can shut the client down cleanly, letting the
+# profiler flush its report on exit.
+dhat-heap = ["dep:dhat", "tokio/signal"]
 
 [dependencies]
-moka = { version = "0.12", features = ["future"] }
 num_cpus = "1"
 bytes = { version = "1", default-features = false, features = ["std"] }
 
@@ -40,7 +44,6 @@ uuid = { version = "1", default-features = false, features = ["serde", "std"] }
 
 # TUIC
 tuic-core = { path = "../tuic-core", default-features = false, features = ["async_marshal", "marshal", "model"] }
-register-count = { version = "0.1.0", default-features = false, features = ["std"] }
 
 # Tokio/Async
 crossbeam-utils = { version = "0.8", default-features = false, features = ["std"] }
@@ -65,7 +68,8 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["t
 chrono = "0.4"
 tracing = "0.1"
 
-tikv-jemallocator = { version = "0.6", optional = true }
+tikv-jemallocator = { version = "0.7", optional = true }
+dhat = { version = "0.3", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -27,16 +27,16 @@ pub mod utils;
 pub use config::{Cli, Config, Control};
 
 pub struct AppContext {
-	pub cfg:            Config,
+	pub cfg: Config,
 	pub online_counter: HashMap<Uuid, AtomicUsize>,
 	pub online_clients: Cache<Uuid, Arc<Cache<usize, compat::QuicClient>>>,
-	pub traffic_stats:  HashMap<Uuid, (AtomicUsize, AtomicUsize)>,
-	pub cancel:         CancellationToken,
+	pub traffic_stats: HashMap<Uuid, (AtomicUsize, AtomicUsize)>,
+	pub cancel: CancellationToken,
 }
 
 pub struct ServerGuard {
 	pub local_addr: std::net::SocketAddr,
-	pub cancel:     CancellationToken,
+	pub cancel: CancellationToken,
 }
 
 /// Run the TUIC server with the given configuration.
@@ -44,12 +44,12 @@ pub struct ServerGuard {
 /// a cancellation token for graceful shutdown.
 pub async fn run(cfg: Config) -> eyre::Result<ServerGuard> {
 	let mut online_counter = HashMap::new();
-	for (user, _) in cfg.users.iter() {
+	for user in cfg.users.keys() {
 		online_counter.insert(user.to_owned(), AtomicUsize::new(0));
 	}
 
 	let mut traffic_stats = HashMap::new();
-	for (user, _) in cfg.users.iter() {
+	for user in cfg.users.keys() {
 		traffic_stats.insert(user.to_owned(), (AtomicUsize::new(0), AtomicUsize::new(0)));
 	}
 

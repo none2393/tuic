@@ -30,8 +30,13 @@ impl Server {
 		);
 
 		// Check for existing session with same ID
-		if ctx.socks5_udp_sessions.contains_key(&assoc_id) {
-			warn!("[socks5] [{peer_addr}] [associate] [{assoc_id:#06x}] session ID already exists! This may cause conflicts");
+		{
+			let sessions = ctx.socks5_udp_sessions.read().await;
+			if sessions.contains_key(&assoc_id) {
+				warn!(
+					"[socks5] [{peer_addr}] [associate] [{assoc_id:#06x}] session ID already exists! This may cause conflicts"
+				);
+			}
 		}
 
 		match UdpSession::new(assoc_id, peer_addr, local_ip, dual_stack, max_pkt_size) {
@@ -47,7 +52,9 @@ impl Server {
 					}
 				};
 
-				ctx.socks5_udp_sessions.insert(assoc_id, session.clone()).await;
+				{
+					ctx.socks5_udp_sessions.write().await.insert(assoc_id, session.clone());
+				}
 
 				let ctx_loop = ctx.clone();
 				let handle_local_incoming_pkt = async move {
@@ -101,7 +108,9 @@ impl Server {
 
 				debug!("[socks5] [{peer_addr}] [associate] [{assoc_id:#06x}] stopped associating");
 
-				ctx.socks5_udp_sessions.remove(&assoc_id).await.unwrap();
+				{
+					ctx.socks5_udp_sessions.write().await.remove(&assoc_id).unwrap();
+				}
 
 				if let Ok(conn) = ctx.get_conn().await
 					&& let Err(err) = conn.dissociate(assoc_id).await

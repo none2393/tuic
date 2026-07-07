@@ -15,6 +15,9 @@ repository.workspace = true
 default = ["aws-lc-rs"]
 aws-lc-rs = ["tuic-core/aws-lc-rs", "dep:aws-lc-rs", "rustls/aws-lc-rs", "rcgen/aws_lc_rs", "rustls-acme/aws-lc-rs"]
 jemallocator = ["tikv-jemallocator"]
+# Heap profiling / resource-leak detection via dhat. Replaces the global
+# allocator, so it is mutually exclusive with `jemallocator` (dhat wins).
+dhat-heap = ["dep:dhat"]
 
 [dependencies]
 h3 = "0.0.8"
@@ -30,7 +33,6 @@ sha2 = "0.11"
 
 # TUIC
 tuic-core = { path = "../tuic-core", default-features = false, features = ["async_marshal", "marshal", "model"] }
-register-count = { version = "0.1.0", default-features = false, features = ["std"] }
 
 # Tokio/Async
 tokio = { version = "1", default-features = false, features = ["io-util", "macros", "net", "parking_lot", "rt-multi-thread", "time", "fs", "signal"] }
@@ -82,7 +84,8 @@ futures = "0.3"
 peekable = { version = "0.6.1", default-features = false, features = ["tokio"] }
 smallvec = { version = "1", default-features = false }
 
-tikv-jemallocator = { version = "0.6", optional = true }
+tikv-jemallocator = { version = "0.7", optional = true }
+dhat = { version = "0.3", optional = true }
 rand = "0.10"
 
 [dev-dependencies]
